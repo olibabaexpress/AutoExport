@@ -1,0 +1,18 @@
+# Per-machine state, logs and debug output
+data/
+LOGS/
+debug/
+SCRIPT_STATE.json
+
+# Junk / sketches kept locally only
+_archive/
+test_scrips/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.venv/
+
+# Editor
+.vscode/
