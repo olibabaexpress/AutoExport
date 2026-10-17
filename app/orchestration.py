@@ -21,14 +21,16 @@ logger.setLevel(logging.DEBUG)
 if not logger.handlers:
     # File handler (all messages)
     file_handler = logging.handlers.RotatingFileHandler(
-        log_filename, maxBytes=10*1024*1024, backupCount=5
+        log_filename, maxBytes=10*1024*1024, backupCount=5,
+        encoding="utf-8", errors="backslashreplace",
     )
     file_handler.setLevel(logging.DEBUG)
 
     # Console handler (info and above)
-    console_handler = logging.StreamHandler()
-    console_handler.setLevel(logging.INFO)
-    console_handler.stream.reconfigure(encoding='utf-8', errors='replace')  # Handle Unicode gracefully on Windows
+    console_handler = logging.StreamHandler(sys.stderr) if sys.stderr is not None else None
+    if console_handler is not None:
+        console_handler.setLevel(logging.INFO)
+        console_handler.stream.reconfigure(encoding='utf-8', errors='replace')
 
     # Formatter
     formatter = logging.Formatter(
@@ -36,11 +38,13 @@ if not logger.handlers:
         datefmt='%Y-%m-%d %H:%M:%S'
     )
     file_handler.setFormatter(formatter)
-    console_handler.setFormatter(formatter)
+    if console_handler is not None:
+        console_handler.setFormatter(formatter)
 
     # Add handlers
     logger.addHandler(file_handler)
-    logger.addHandler(console_handler)
+    if console_handler is not None:
+        logger.addHandler(console_handler)
 
 # Prevent propagation to root logger (which might have its own handler)
 logger.propagate = False
@@ -52,21 +56,22 @@ logger.info("="*70)
 import argparse
 import live
 import time
-import nltk
 import json
 import traceback  
 import cv2
 from pathlib import Path
 import ableton_build
 import ableton_state
+import system_deps
 import project_structure
 import naming_settings
 from ableton_readiness import AbletonReadinessMonitor, wait_for_ableton_ready
 from project_and_file_naming import sanitize_filename, get_project_modification_date, build_stems_folder_name
 from window_management import launch_ableton_from_menu, maximize_ableton_window, close_ableton_cleanly
 from popup_automation import (
-    wait_for_recover_or_asio, detect_save_changes_to_popup, handle_save_changes_to,
+    detect_recover_popup, wait_for_recover_or_asio, detect_save_changes_to_popup, handle_save_changes_to,
     dismiss_invalid_popup, dismiss_recover_popup, dismiss_asio_popup, handle_qubiq_popup,
+    dismiss_codec_popup, dismiss_kontakt_popup, dismiss_plugin_messagebox_popups,
 )
 from export_automation import (
     collect_all_and_save, export_stems, export_main,
@@ -77,12 +82,12 @@ from pylive_commands import disable_audio_effects, disable_main_effects
 from find_clusters import project_render_ranges
 from window_utils import wait_for_window, find_window, find_window_in_children, find_window_by_title_win32, win_exists, win_activate_ableton, win_activate, win_close, win_exists_by_class, win_close_by_class, _list_windows_by_class_win32
 from export_path_config import get_export_path
+import audio_settings
 # abletoolz-based missing media resolution (runs before Ableton is even launched)
 from sample_database import load_index as load_sample_db
 from missing_media_resolver import resolve_missing_media_bulk
 
-# Import crash report handling functions from module
-from crash_report_handler import close_crash_report
+
 
 
 try:
@@ -96,10 +101,8 @@ except ImportError as e:
     logger.error("Install with: pip install pyautogui pywinauto psutil")
     sys.exit(1) 
 
-try:
-    nltk.data.find('corpora/stopwords')
-except LookupError:
-    nltk.download('stopwords')
+if not system_deps.configure_tesseract():
+    logger.error("Tesseract OCR not found - export dialog and popup detection will fail")
 
 # Configure pyautogui safety features   
 pyautogui.FAILSAFE = True  # Move mouse to corner to abort
@@ -125,7 +128,7 @@ STEMS_EXPORT_PATH = os.path.join(BASE_EXPORT_PATH, "STEMS")
 ON_FAILURE_STOP = "stop"
 ON_FAILURE_RECOVER = "recover"
 DEFAULT_ON_FAILURE = ON_FAILURE_RECOVER
-MAX_CONSECUTIVE_FAILURES = 3
+MAX_CONSECUTIVE_FAILURES = 99999999999999999999999999
 
 # Timeouts are ceilings sized for slow (HDD) machines; every wait returns as
 # soon as its condition is met, so fast machines don't pay for them.
@@ -376,6 +379,30 @@ class RunAborted(Exception):
     """The whole run must stop (stop policy, or too many failures in a row)."""
 
 
+def _main_window_project_name():
+    """Name of the set currently in Live's main window (no .als, no '*')."""
+    try:
+        for info in ableton_state.ableton_windows():
+            title = info.title or ""
+            if "Ableton Live" not in title:
+                continue
+            name = title.split(" - Ableton Live")[0].strip().rstrip("*").strip()
+            if name:
+                return name
+            return None
+    except Exception:
+        pass
+    return None
+
+
+def _is_unopenable_abletoolz_result(res):
+    """True when the abletoolz pre-pass already proved the .als can't open."""
+    if not res or res.get("success"):
+        return False
+    err = str(res.get("error") or "").lower()
+    return "file not found" in err or "parse" in err
+
+
 def dismiss_known_popups(_state=None):
     """Try every popup handler we know how to answer. True if one was handled.
 
@@ -384,16 +411,62 @@ def dismiss_known_popups(_state=None):
     popup none of these recognise (e.g. the recursive-project warning) is
     left open, the wait times out, and the project is flagged.
     """
-    if detect_save_changes_to_popup(threshold=0.8):
+    return handle_open_popups(stage="open")
+
+
+def handle_open_popups(stage="open", verbose_recover=False):
+    """Stage-aware popup handling for the project-open sequence.
+
+    Stages mirror the open flow you walked through:
+      1. "pre_open"  - after finishing a project, before Ctrl+O: a save-changes
+         prompt for the currently-open set blocks the Open dialog.
+      2. "open"      - while waiting for the new set: save-changes first, then
+         plugin/codec/invalid popups for the set being opened.
+      3. "post_open" - the new set is showing: recover/ASIO startup popups.
+
+    "open" answers everything (backwards compatible with the old single
+    function); the pre/post stages just skip checks that can't apply yet.
+    Returns True when a popup was handled.
+    """
+    # Plugin messageboxes first: handle/class based, no screenshots, so a
+    # "Kontakt 7"/Qubiq-style popup is cleared before any OCR check runs -
+    # otherwise detect_save_changes_to_popup screenshots the untitled Ableton
+    # window with the plugin dialog drawn on top and matches garbage (0.45).
+    # Covers Kontakt, Qubiq and any future plugin that raises the same kind
+    # of named #32770 dialog; every popup is logged with its handle.
+    check_save_changes = stage in ("pre_open", "open")
+    check_startup = stage in ("open", "post_open")
+    if stage == "pre_open":
+        # Stage 1: only the previous set's save-changes prompt can block
+        # Ctrl+O here - anything else belongs to a set not yet requested.
+        if detect_save_changes_to_popup(
+            threshold=0.8, current_project=_main_window_project_name()
+        ):
+            logger.info("Save changes popup detected (pre-open) - answering")
+            handle_save_changes_to()
+            return True
+        return False
+    if check_save_changes and detect_save_changes_to_popup(
+        threshold=0.8, current_project=_main_window_project_name()
+    ):
         logger.info("Save changes popup detected - answering")
         handle_save_changes_to()
         return True
-    if dismiss_recover_popup():
+    if dismiss_plugin_messagebox_popups():
+        logger.info("Plugin messagebox popup dismissed, proceeding with project")
         return True
-    if dismiss_asio_popup():
+    if check_startup and dismiss_recover_popup(verbose=verbose_recover):
+        return True
+    if check_startup and dismiss_asio_popup():
         return True
     if dismiss_invalid_popup():
         logger.info("Invalid audio file popup dismissed, proceeding with project")
+        return True
+    if dismiss_codec_popup():
+        logger.info("Codec (MediaFoundation) popup dismissed, proceeding with project")
+        return True
+    if dismiss_kontakt_popup():
+        logger.info("Kontakt 7 popup dismissed, proceeding with project")
         return True
     if win_exists("Qubiq Engine"):
         handle_qubiq_popup()
@@ -442,7 +515,11 @@ def wait_for_project_open(project_path, timeout):
             logger.info(f">>> '{project_name}' open after {time.time() - start:.1f}s")
             return
         if state["blockers"]:
-            dismiss_known_popups(state)
+            # Stage 2: the save-changes prompt is for the previously-open set
+            # and blocks the requested set - handle_open_popups answers "No"
+            # so the open can proceed. verbose_recover logs per-window OCR so
+            # a missed recover popup leaves a trace of what OCR saw.
+            handle_open_popups(stage="open", verbose_recover=True)
         time.sleep(0.5)
     raise ProjectStepError(
         "project_open",
@@ -476,6 +553,18 @@ def process_project(project_path, export_path, project_date, task, ableton_versi
     """
     recovery_popup_occurred = False
 
+    # Bug 1: the GUI's size-estimate stage already tried to unpack this .als
+    # with abletoolz and failed (e.g. hubworld's bogus directory) - Ableton
+    # then opens an empty "Untitled" set instead of erroring, so fail fast
+    # here rather than burning an open cycle on a set that can't load.
+    if _is_unopenable_abletoolz_result(abletoolz_result):
+        raise ProjectStepError(
+            "project_open",
+            f"Skipping: abletoolz pre-pass could not unpack this set ({abletoolz_result.get('error')})",
+        )
+    if not os.path.exists(project_path):
+        raise ProjectStepError("project_open", f"Skipping: file not found: {project_path}")
+
     if fresh_launch:
         if not launch_ableton(project_path):
             raise ProjectStepError("launch", "Could not start the Ableton process")
@@ -497,14 +586,14 @@ def process_project(project_path, export_path, project_date, task, ableton_versi
     # The previous set (if any) is closed now, so its wet+dry changes are gone.
     ableton_state.clear_unsaveable_changes()
 
-    logger.info(">>> Waiting for Ableton to respond...")
+    logger.debug(">>> Waiting for Ableton to respond...")
     wait_for_main_window_responsive(timeout=PROJECT_LOAD_TIMEOUT)
 
     # Memory-stabilisation heuristic; a timeout here is not proof of a
     # problem, so it only warns - the clean-state check below is the gate.
     success, elapsed = wait_for_ableton_ready(timeout=120, verbose=True)
     if success:
-        logger.info(f"[OK] Ableton is ready ({elapsed:.1f}s after window detection)")
+        logger.debug(f"[OK] Ableton is ready ({elapsed:.1f}s after window detection)")
     else:
         logger.warning(f"Ableton memory did not stabilise within {elapsed:.1f}s - continuing to clean-state check")
 
@@ -515,14 +604,14 @@ def process_project(project_path, export_path, project_date, task, ableton_versi
 
     cpu_load = get_cpu_load()
     if cpu_load > 80:
-        logger.info(f"System is buffering, CPU load is high: {cpu_load}%")
+        logger.debug(f"System is buffering, CPU load is high: {cpu_load}%")
         time.sleep(5)
     else:
-        logger.info(f"System is not buffering, CPU load is: {cpu_load}%")
+        logger.debug(f"System is not buffering, CPU load is: {cpu_load}%")
 
     win_activate_ableton()
     time.sleep(0.2)
-    logger.info("Ableton window is active and ready")
+    logger.debug("Ableton window is active and ready")
 
     maximize_ableton_window()
 
@@ -533,11 +622,11 @@ def process_project(project_path, export_path, project_date, task, ableton_versi
     # kept as timeout ceilings so a slow-loading project degrades to exactly
     # the previous behaviour instead of failing early.
     osc_timeout = 11 if fresh_launch else 7
-    logger.info(f">>> Waiting for Ableton OSC daemon (up to {osc_timeout}s)...")
+    logger.debug(f">>> Waiting for Ableton OSC daemon (up to {osc_timeout}s)...")
 
     try:
         set = live.Set(scan=False)
-        logger.info(">>> Set object created successfully")
+        logger.debug(">>> Set object created successfully")
     except Exception as e:
         raise ProjectStepError("osc", f"Failed to create live.Set(): {e}")
 
@@ -567,11 +656,57 @@ def process_project(project_path, export_path, project_date, task, ableton_versi
             "(the scan below may still succeed)."
         )
 
+    # The network-based scan can fail with a NameError when the set has
+    # groups (pylive doesn't initialise the `track` variable for group tracks).
+    # Fall back to file-based scan in that case so we can still resolve media.
     try:
         set.scan(mode="auto")
-        logger.info(">>> Network scan complete")
+        logger.debug(">>> Network scan complete")
     except Exception as e:
         logger.warning(f">>> Network scan failed: {e}")
+        logger.info(">>> Falling back to file-based scan...")
+        try:
+            set.scan(mode="file")
+            logger.debug(">>> File-based scan complete")
+        except Exception as e2:
+            logger.warning(f">>> File-based scan also failed: {e2}")
+
+    # Bug 4 (silent): a soloed track renders silently into stems, so unsolo
+    # everything up front - verified, not just logged. export_stems/export_main
+    # used to rely on a best-effort helper whose per-track failures were only
+    # debug lines, and num_tracks counts song tracks while set.tracks can be
+    # shorter (group tracks) - hence the old "index out of range" spam.
+    if export_on := (task.get("export_main", False) or task.get("export_stems", False)):
+        try:
+            tracks = list(set.tracks) if getattr(set, "tracks", None) else []
+        except Exception:
+            tracks = []
+        unsolo_failed = 0
+        for idx, track in enumerate(tracks):
+            name = getattr(track, "name", idx)
+            for attr in ("solo", "arm"):
+                try:
+                    setattr(track, attr, False)
+                except Exception as e:
+                    unsolo_failed += 1
+                    logger.warning(f"Could not clear {attr} on track {name!r}: {e}")
+        # Verify via direct /live/track OSC (song.tracks, same index space as
+        # the Track objects above - no num_tracks/len mismatch possible).
+        still_soloed = []
+        for idx, track in enumerate(tracks):
+            try:
+                solo = set.live.query("/live/track/get/solo", (idx,))[1]
+                if solo:
+                    still_soloed.append(getattr(track, "name", idx))
+            except Exception:
+                pass
+        if still_soloed or unsolo_failed:
+            raise ProjectStepError(
+                "unsolo",
+                f"Could not clear solo/arm on all tracks (failed={unsolo_failed} "
+                f"still_soloed={still_soloed})",
+            )
+        logger.info(f"Cleared solo/arm on {len(tracks)} tracks (verified via OSC)")
 
     # Check for missing media. Abletoolz already resolved whatever it could
     # during the pre-pass in main() before Ableton was launched (see
@@ -595,19 +730,18 @@ def process_project(project_path, export_path, project_date, task, ableton_versi
     time.sleep(0.2)
 
     export_on = task.get("export_main", False) or task.get("export_stems", False)
-
     if export_on:
         # Arrangement view
         pyautogui.hotkey('alt', '2')
         time.sleep(0.5)
-        logger.info("Moved focus to the arrangement view")
+        logger.debug("Moved focus to the arrangement view")
 
-        if recovery_popup_occurred:
-            logger.info("Attempting to close crash report (recovery popup was present)...")
-            close_crash_report(timeout=10, debug=True)
-            time.sleep(0.3)
-        else:
-            logger.info("Skipping crash report check (no recovery popup occurred)")
+        #if recovery_popup_occurred:
+        #    logger.info("Attempting to close crash report (recovery popup was present)...")
+        #    close_crash_report(timeout=10, debug=True)
+        #    time.sleep(0.3)
+        #else:
+        #    logger.info("Skipping crash report check (no recovery popup occurred)")
 
     should_collect_and_save = task.get("collect_all_and_save", False) or missing_media_was_handled
 
@@ -622,6 +756,11 @@ def process_project(project_path, export_path, project_date, task, ableton_versi
     wet_dry = task.get("wet_dry", False)
     render_ranges = project_render_ranges(project_path) if export_on else None
 
+    # Audio-format preferences (Sample Rate / Bit Depth / File Type / Dither)
+    # come from the saved config, so every export uses whatever the user set in
+    # the Audio Settings window rather than whatever Ableton last remembered.
+    audio = audio_settings.load()
+
     if task.get("export_main", False):
         wet_suffix = None
         if wet_dry:
@@ -635,14 +774,15 @@ def process_project(project_path, export_path, project_date, task, ableton_versi
         if not export_main(project_date, ableton_version, set,
                     include_return_and_main_effects=include_return_fx,
                     normalize=normalize, project_path=project_path,
-                    render_ranges=render_ranges, name_suffix=wet_suffix or ""):
+                    render_ranges=render_ranges, name_suffix=wet_suffix or "",
+                    audio=audio):
             raise ProjectStepError("export_main", "Main mix export failed")
         ensure_clean("after export main")
         if wet_suffix and _switch_to_dry("main", disable_main_effects, set):
             if not export_main(project_date, ableton_version, set,
                         include_return_and_main_effects=include_return_fx,
                         normalize=normalize, project_path=project_path,
-                        render_ranges=render_ranges):
+                        render_ranges=render_ranges, audio=audio):
                 raise ProjectStepError("export_main_dry", "Dry main mix export failed")
             ensure_clean("after dry export main")
         logger.info("Export Main operation completed")
@@ -651,7 +791,7 @@ def process_project(project_path, export_path, project_date, task, ableton_versi
         stems_path = export_stems(export_path, project_path, project_date, ableton_version, set,
                      include_return_and_main_effects=include_return_fx,
                      normalize=normalize, render_ranges=render_ranges,
-                     pass_folder=WET_FOLDER if wet_dry else None)
+                     pass_folder=WET_FOLDER if wet_dry else None, audio=audio)
         if not stems_path:
             raise ProjectStepError("export_stems", "Stem export failed")
         ensure_clean("after export stems")
@@ -659,7 +799,7 @@ def process_project(project_path, export_path, project_date, task, ableton_versi
             if not export_stems(stems_path, project_path, project_date, ableton_version, set,
                          include_return_and_main_effects=include_return_fx,
                          normalize=normalize, render_ranges=render_ranges,
-                         pass_folder=DRY_FOLDER, name_suffix=DRY_SUFFIX):
+                         pass_folder=DRY_FOLDER, name_suffix=DRY_SUFFIX, audio=audio):
                 raise ProjectStepError("export_stems_dry", "Dry stem export failed")
             ensure_clean("after dry export stems")
         logger.info("Export Stems operation completed")
@@ -832,7 +972,7 @@ def main():
 
     logger.info("="*50)
     logger.info("AutoExport Python Script Started")
-    logger.info(f"Failure policy: {args.on_failure}")
+    logger.debug(f"Failure policy: {args.on_failure}")
     logger.info(f"Ableton: {ABLETON_PATH or 'NOT CONFIGURED'} (window title '{ABLETON_WINDOW_TITLE}')")
     logger.info("="*50)
 
@@ -851,7 +991,11 @@ def main():
     state_file = data_file("SCRIPT_STATE.json")
     try:
         with open(state_file, 'w', encoding='utf-8') as f:
-            json.dump({"status": "running", "started_at": datetime.now().isoformat()}, f)
+            json.dump({
+                "status": "running",
+                "started_at": datetime.now().isoformat(),
+                "pid": os.getpid(),
+            }, f)
     except Exception as e:
         logger.warning(f"Could not write state file: {e}")
 
@@ -885,7 +1029,7 @@ def _run(task_file, on_failure):
     ableton_version = get_ableton_version()
     naming = naming_settings.load_settings()
     append_version = naming["include_ableton_version"]
-    logger.info(f"DEBUG: append version setting: {append_version}")
+    logger.debug(f"DEBUG: append version setting: {append_version}")
 
     if append_version:
         rename_suffix = f" (AL{ableton_version})"

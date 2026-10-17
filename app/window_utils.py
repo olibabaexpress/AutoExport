@@ -1,17 +1,113 @@
 import time
 import re
+import ctypes
 import logging
+from ctypes import wintypes
 from pywinauto import Application, Desktop
-from pywinauto.findwindows import ElementAmbiguousError
+
 logger = logging.getLogger("AutoExport")
+
+_user32 = ctypes.windll.user32
+_user32.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+_user32.GetWindowTextLengthW.argtypes = [wintypes.HWND]
+
+VK_CAPITAL = 0x14
+
+
+def caps_lock_is_on():
+    """Read the toggled state of Caps Lock via the Win32 API."""
+    try:
+        return bool(_user32.GetKeyState(VK_CAPITAL) & 0x0001)
+    except Exception:
+        return False
+
+
+def ensure_caps_lock_off():
+    """Turn Caps Lock off if it is on.
+
+    pyautogui.write() types uppercase letters as Shift+letter, which under an
+    active Caps Lock produces lowercase (and plain keys produce uppercase),
+    so every letter of a typed filename gets its case inverted. That saved
+    mangled WAV names ("bONTEMPI mIXDOWN...") and then the filename checks
+    reported the render as missing. Call this before any pyautogui.write()
+    that types a path, filename, or any text where case matters.
+    """
+    if not caps_lock_is_on():
+        return
+    logger.warning("Caps Lock is on - turning it off before typing")
+    try:
+        _user32.keybd_event(VK_CAPITAL, 0, 0, 0)
+        _user32.keybd_event(VK_CAPITAL, 0, 0x0002, 0)  # KEYEVENTF_KEYUP
+        time.sleep(0.05)  # let the toggle settle before keystrokes land
+    except Exception as e:
+        logger.error(f"Could not turn Caps Lock off: {e}")
+
+
+def _raw_window_title(hwnd):
+    """Window title via GetWindowTextW, bypassing the owning process.
+
+    pywinauto's window_text() goes through SendMessageTimeout with
+    SMTO_ABORTIFHUNG, which returns '' when the owning thread has stopped
+    pumping messages - exactly what Ableton does while writing a large .als
+    to a slow (HDD) export folder. Every title match then fails and a popup
+    that is really on screen goes undetected. GetWindowTextW reads the title
+    straight out of the window record and works either way.
+    """
+    length = _user32.GetWindowTextLengthW(hwnd)
+    if length <= 0:
+        return ""
+    buf = ctypes.create_unicode_buffer(length + 1)
+    _user32.GetWindowTextW(hwnd, buf, length + 1)
+    return buf.value
+
+
+def _raw_matching_hwnds(title_re_pattern, visible_only=True):
+    """Top-level hwnds whose title matches the regex, read via GetWindowTextW."""
+    try:
+        regex = re.compile(title_re_pattern, re.IGNORECASE)
+    except re.error as e:
+        logger.error(f"Invalid window title regex {title_re_pattern!r}: {e}")
+        return []
+
+    matches = []
+
+    @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+    def _collect(hwnd, _lparam):
+        if visible_only and not _user32.IsWindowVisible(hwnd):
+            return True
+        if regex.search(_raw_window_title(hwnd)):
+            matches.append(hwnd)
+        return True
+
+    try:
+        _user32.EnumWindows(_collect, 0)
+    except Exception as e:
+        logger.debug(f"EnumWindows failed for {title_re_pattern!r}: {e}")
+    return matches
 
 
 def _find_all_window_elements(title_re_pattern, backend="uia"):
-    """All top-level windows matching a title regex, or [] on any failure."""
-    try:
-        return Desktop(backend=backend).windows(title_re=title_re_pattern)
-    except Exception:
+    """All visible top-level windows matching a title regex, or [] on failure."""
+    hwnds = _raw_matching_hwnds(title_re_pattern)
+    if not hwnds:
         return []
+    # Bug 2 fallout: wrapping every hwnd in one list comprehension means a
+    # single dying COM object ("An event was unable to invoke any of the
+    # subscribers" while the Export dialog tears down) discards ALL matches.
+    # Wrap per-handle so one bad window can't hide the rest.
+    wrapped = []
+    try:
+        desktop = Desktop(backend=backend)
+    except Exception as e:
+        logger.debug(f"Could not open Desktop({backend}) for {title_re_pattern!r}: {e}")
+        return []
+    for h in hwnds:
+        try:
+            wrapped.append(desktop.windows(handle=h)[0])
+        except Exception as e:
+            logger.debug(f"Could not wrap window {h} for {title_re_pattern!r}: {e}")
+            continue
+    return wrapped
 
 
 def _pick_best_window(candidates):
@@ -29,18 +125,27 @@ def _pick_best_window(candidates):
 
 def _find_window_element(title_re_pattern, backend="uia", timeout=2):
     """
-    Resolve a single window by title regex, without letting pywinauto's
-    ElementAmbiguousError bubble up as an unhandled failure when more than
-    one window matches (a lingering/ghost Ableton window is common after a
-    crash or an unclean close). Returns a window element or None.
+    Resolve a single window by title regex, or None if it never appears.
+
+    Enumerates Desktop.windows() rather than Application.connect():
+    connect() forces visible_only=False, so it happily returns a hidden/ghost
+    window left behind by a crash, and it only reports ambiguity when *several*
+    windows match - a lone ghost is returned without any warning at all, and
+    set_focus() on it then fails or focuses nothing. Desktop() defaults to
+    visible_only=True and returns every match, so _pick_best_window can choose
+    the real window whenever there is a choice.
+
+    Polls for the full timeout (as connect(timeout=) did) but returns as soon
+    as a match turns up, instead of blocking for the whole timeout on a miss.
     """
-    try:
-        app = Application(backend=backend).connect(title_re=title_re_pattern, timeout=timeout)
-        return app.window(title_re=title_re_pattern)
-    except ElementAmbiguousError:
-        return _pick_best_window(_find_all_window_elements(title_re_pattern, backend))
-    except Exception:
-        return None
+    start_time = time.time()
+    while True:
+        window = _pick_best_window(_find_all_window_elements(title_re_pattern, backend))
+        if window is not None:
+            return window
+        if time.time() - start_time >= timeout:
+            return None
+        time.sleep(0.1)
 
 
 ## window management functions
@@ -112,13 +217,13 @@ def win_activate_ableton():
     """Activate the Ableton Live window."""
     window = _find_window_element(".*Ableton Live.*", backend="uia")
     if window is None:
-        logger.info("Could not activate Ableton window: no matching window found")
+        logger.debug("Could not activate Ableton window: no matching window found")
         return None
     try:
         window.set_focus()
         return window
     except Exception as e:
-        logger.info(f"Could not activate Ableton window: {e}")
+        logger.debug(f"Could not activate Ableton window: {e}")
         return None
 
 

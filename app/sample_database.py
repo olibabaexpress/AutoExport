@@ -12,6 +12,8 @@ with more samples is plugged in), so it is user-editable configuration
 """
 
 import logging
+import time
+from threading import Event
 from datetime import datetime
 from pathlib import Path
 import create_db_patch
@@ -72,13 +74,19 @@ def remove_sample_dir(path):
     return dirs
 
 
-def build_or_update_index(directories=None, progress_callback=None):
+def build_or_update_index(
+    directories=None,
+    progress_callback=None,
+    pause_event: Event | None = None,
+):
     """
     Scan the configured (or given) directories and build/update the sample database.
 
     Args:
     directories: Optional list of directory paths. Defaults to load_sample_dirs().
     progress_callback: Optional callable(stage, current, total) used for progress updates.
+    pause_event: Optional set event that allows indexing to proceed. Clearing it
+        pauses at the next file or directory boundary.
 
     Returns:
         (db_path, entry_count)
@@ -88,6 +96,12 @@ def build_or_update_index(directories=None, progress_callback=None):
     """
     if directories is None:
         directories = load_sample_dirs()
+
+    started = time.monotonic()
+    logger.info(
+        "Sample index build requested for %d configured director%s",
+        len(directories), "y" if len(directories) == 1 else "ies",
+    )
 
     valid_dirs = [d for d in directories if Path(d).exists()]
     missing_dirs = [d for d in directories if not Path(d).exists()]
@@ -104,15 +118,20 @@ def build_or_update_index(directories=None, progress_callback=None):
     #    progress_callback(f"Scanning {len(valid_dirs)} directory(ies) for audio files (this can take a while on first run)...")
 
     db_path = create_db_patch.create_or_update_db(
-    valid_dirs,
-    db_path=DB_PATH,
-    progress_callback=progress_callback,
-)
+        valid_dirs,
+        db_path=DB_PATH,
+        progress_callback=progress_callback,
+        pause_event=pause_event,
+    )
     db = create_db_patch.load_db(db_path)
 
     #if progress_callback:
     #    progress_callback(f"Done. Sample database now has {len(db)} indexed file(s).")
 
+    logger.info(
+        "Sample index build finished: %d entries in %.1fs -> %s",
+        len(db), time.monotonic() - started, db_path,
+    )
     return db_path, len(db)
 
 

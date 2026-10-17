@@ -16,14 +16,17 @@ installed somewhere read-only).
 
 import os
 import shutil
+import sys
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
-ROOT_DIR = os.environ.get("AUTOEXPORT_HOME") or os.path.dirname(APP_DIR)
+INSTALL_DIR = os.path.dirname(sys.executable) if getattr(sys, "frozen", False) else os.path.dirname(APP_DIR)
+ROOT_DIR = os.path.abspath(os.environ.get("AUTOEXPORT_HOME") or INSTALL_DIR)
+RESOURCE_DIR = getattr(sys, "_MEIPASS", INSTALL_DIR)
 
 DATA_DIR = os.path.join(ROOT_DIR, "data")
 LOG_DIR = os.path.join(ROOT_DIR, "LOGS")
 DEBUG_DIR = os.path.join(ROOT_DIR, "debug")
-VENDOR_DIR = os.path.join(ROOT_DIR, "vendor")
+VENDOR_DIR = os.path.join(RESOURCE_DIR, "vendor")
 
 # Data used to live in app/data; move it across once.
 _LEGACY_DATA_DIR = os.path.join(APP_DIR, "data")
@@ -48,7 +51,8 @@ def _migrate_legacy_data():
         pass
 
 
-_migrate_legacy_data()
+if not getattr(sys, "frozen", False):
+    _migrate_legacy_data()
 for _d in (DATA_DIR, LOG_DIR, DEBUG_DIR):
     os.makedirs(_d, exist_ok=True)
 

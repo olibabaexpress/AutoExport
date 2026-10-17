@@ -1,12 +1,15 @@
 
 import json
+import logging
 from pathlib import Path
 
 from abletoolz.live_set import AbletonSet
 from find_clusters import render_ranges, TICKS_PER_BEAT, TAIL_BARS
 import os
 from paths import data_file
+import audio_settings
 TASK_FILE = data_file("EXPORT_TASKS.json")
+logger = logging.getLogger(__name__)
 
 
 
@@ -14,9 +17,29 @@ TASK_FILE = data_file("EXPORT_TASKS.json")
 # DEFAULT WAV SETTINGS
 # ============================================================
 
+# Fallbacks used only if audio_settings (config.json) can't be read. The
+# user's saved audio preferences are the real source of truth; these mirror
+# audio_settings.DEFAULTS so a fresh install still estimates sensibly.
 DEFAULT_SAMPLE_RATE = 44100
-DEFAULT_BIT_DEPTH = 24
+DEFAULT_BIT_DEPTH = 16
 DEFAULT_CHANNELS = 2
+
+
+def _resolve_render_settings(sample_rate, bit_depth, channels):
+    """Fill any None sample_rate/bit_depth/channels from the saved audio settings.
+
+    The functions below used to hardcode DEFAULT_* as their default arguments,
+    which are frozen at import time and ignore the user's Audio Settings. Now
+    they accept None and resolve here at call time, so the size estimate tracks
+    whatever Sample Rate / Bit Depth the user has chosen. Any argument the
+    caller passed explicitly always wins; only the None ones are filled.
+    """
+    saved = audio_settings.load().render_settings()
+    return (
+        saved["sample_rate"] if sample_rate is None else sample_rate,
+        saved["bit_depth"] if bit_depth is None else bit_depth,
+        saved["channels"] if channels is None else channels,
+    )
 
 
 # ============================================================
@@ -90,10 +113,11 @@ def calculate_bytes_per_second(
 
 def calculate_track_size(
     duration_seconds,
-    sample_rate=DEFAULT_SAMPLE_RATE,
-    bit_depth=DEFAULT_BIT_DEPTH,
-    channels=DEFAULT_CHANNELS,
+    sample_rate=None,
+    bit_depth=None,
+    channels=None,
 ):
+    sample_rate, bit_depth, channels = _resolve_render_settings(sample_rate, bit_depth, channels)
     """
     Estimate the size of one WAV rendered for the specified duration.
 
@@ -112,6 +136,37 @@ def calculate_track_size(
     wav_header = 44
 
     return int(audio_bytes + wav_header)
+
+
+def rescale_estimate(result, sample_rate, bit_depth, channels):
+    """Recalculate size from cached render ranges without reopening the set."""
+    ranges = result["render_ranges"]
+    range_count = len(ranges)
+    if not range_count:
+        raise ValueError("Cannot rescale an estimate with no render ranges")
+
+    wav_count = result["wav_count"]
+    if wav_count % range_count:
+        raise ValueError("Cached WAV count does not match its render ranges")
+    tracks_per_range = wav_count // range_count
+
+    bytes_per_track = sum(
+        calculate_track_size(
+            (render_range["end"] - render_range["start"])
+            / TICKS_PER_BEAT * 60 / result["bpm"],
+            sample_rate,
+            bit_depth,
+            channels,
+        )
+        for render_range in ranges
+    )
+    total_bytes = bytes_per_track * tracks_per_range
+
+    updated = dict(result)
+    updated["bytes_per_wav"] = bytes_per_track
+    updated["total_bytes"] = total_bytes
+    updated["total_size"] = format_bytes(total_bytes)
+    return updated
 
 
 # ============================================================
@@ -313,10 +368,11 @@ def estimate_project(
     export_stems,
     export_main,
     include_return_and_main_effects,
-    sample_rate=DEFAULT_SAMPLE_RATE,
-    bit_depth=DEFAULT_BIT_DEPTH,
-    channels=DEFAULT_CHANNELS,
+    sample_rate=None,
+    bit_depth=None,
+    channels=None,
 ):
+    sample_rate, bit_depth, channels = _resolve_render_settings(sample_rate, bit_depth, channels)
     """
     Estimate the WAV export size for one project.
 
@@ -484,15 +540,16 @@ def estimate_project(
 
 def lower_worker_priority():
     """Process-pool initializer: estimates are background work, so worker
-    processes run below normal priority and never compete with the GUI (or
-    with Ableton during an export run)."""
+    processes run at idle priority and yield CPU to the GUI and Ableton."""
     try:
         import psutil
-        psutil.Process().nice(
-            psutil.BELOW_NORMAL_PRIORITY_CLASS if os.name == "nt" else 10
-        )
-    except Exception:
-        pass
+    except ImportError as exc:
+        logger.warning("Could not lower size-estimator worker priority: %s", exc)
+        return
+    try:
+        psutil.Process().nice(psutil.IDLE_PRIORITY_CLASS if os.name == "nt" else 19)
+    except (psutil.Error, OSError) as exc:
+        logger.warning("Could not lower size-estimator worker priority: %s", exc)
 
 
 def estimate_task(task, render_settings):
@@ -518,10 +575,11 @@ def estimate_task(task, render_settings):
 
 def estimate_queue(
     json_path,
-    sample_rate=DEFAULT_SAMPLE_RATE,
-    bit_depth=DEFAULT_BIT_DEPTH,
-    channels=DEFAULT_CHANNELS,
+    sample_rate=None,
+    bit_depth=None,
+    channels=None,
 ):
+    sample_rate, bit_depth, channels = _resolve_render_settings(sample_rate, bit_depth, channels)
     """
     Read the processing queue JSON and estimate the total WAV
     output size.

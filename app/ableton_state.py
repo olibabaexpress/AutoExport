@@ -99,7 +99,7 @@ class WindowInfo:
             flags.append("not responding")
         flag_text = f" [{', '.join(flags)}]" if flags else ""
         return (
-            f"'{self.title}' class={self.class_name} "
+            f"hwnd={self.hwnd} pid={self.pid} '{self.title}' class={self.class_name} "
             f"{self.width}x{self.height} @({self.left},{self.top}){flag_text}"
         )
 

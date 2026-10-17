@@ -11,12 +11,12 @@ group's folder.
 
 import os
 import re
-import shutil
 import logging
 from collections import defaultdict, deque
 
 from track_group_manager import TrackGroupManager
 from project_and_file_naming import sanitize_filename
+from rendered_files import move_rendered_file
 
 logger = logging.getLogger("AutoExport")
 
@@ -182,7 +182,7 @@ class StemsOrganizerByGroup:
         logger.info(f"  {file_name} -> {rel_dest}")
 
         if not dry_run:
-            shutil.move(file_path, dest_path)
+            move_rendered_file(file_path, dest_path)
         self.moved_count += 1
 
         asd_name = file_name + '.asd'
@@ -190,7 +190,7 @@ class StemsOrganizerByGroup:
         if os.path.exists(asd_path):
             asd_dest_path = os.path.join(dest_dir, new_wav_name + '.asd')
             if not dry_run:
-                shutil.move(asd_path, asd_dest_path)
+                move_rendered_file(asd_path, asd_dest_path)
 
 
 def main():

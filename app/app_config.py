@@ -21,6 +21,16 @@ import threading
 
 from paths import DATA_DIR, data_file
 
+# Default audio settings used when config.json has no "audio" section. These
+# mirror the dropdown option lists in audio_settings.py; kept here so config
+# has a sensible initial value before audio_settings is ever imported.
+_DEFAULT_AUDIO = {
+    "sample_rate": "44100",
+    "bit_depth": "16",
+    "file_type": "WAV",
+    "dither": "Triangular",
+}
+
 logger = logging.getLogger("AutoExport")
 
 CONFIG_FILE = data_file("config.json")
@@ -113,6 +123,32 @@ def update(values):
         except OSError as e:
             logger.warning(f"Could not save {CONFIG_FILE}: {e}")
             return False
+
+
+def get_audio():
+    """The saved "audio" settings dict, merged over the defaults.
+
+    Returns a copy so callers can mutate it freely. Any keys the user has
+    saved override the defaults; missing keys fall back to the default so the
+    dict always has sample_rate / bit_depth / file_type / dither present.
+    """
+    stored = get("audio", {}) or {}
+    merged = dict(_DEFAULT_AUDIO)
+    if isinstance(stored, dict):
+        merged.update({k: v for k, v in stored.items() if v is not None})
+    return merged
+
+
+def set_audio(values):
+    """Merge `values` into the saved "audio" settings. Returns True on success.
+
+    Only the provided keys are changed; the rest of the existing audio config
+    is preserved. Keys are validated against the known set so a typo can't
+    silently write junk into config.json.
+    """
+    allowed = _DEFAULT_AUDIO.keys()
+    clean = {k: v for k, v in (values or {}).items() if k in allowed}
+    return update({"audio": {**get_audio(), **clean}})
 
 
 _migrate_legacy()

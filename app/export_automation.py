@@ -38,8 +38,8 @@ from project_and_file_naming import (
     resolve_directory_collision,
 )
 import naming_settings
-from window_utils import win_exists, win_activate, win_activate_ableton
-from popup_automation_pcpatch import (
+from window_utils import win_exists, win_activate, win_activate_ableton, ensure_caps_lock_off
+from popup_automation import (
     _ocr_cache,
     _untitled_live_windows,
     detect_specify_window,
@@ -61,8 +61,10 @@ from export_window_controls import (
     RENDER_TARGET_ALL_INDIVIDUAL_TRACKS,
     apply_toggles,
     capture_export_window,
+    set_dropdown,
 )
-from find_clusters import project_render_ranges, render_position, render_length
+import audio_settings
+from find_clusters import project_render_ranges, render_position, render_length, TICKS_PER_BEAT
 from rendered_files import wait_for_finished_files, move_rendered_file
 
 logger = logging.getLogger("AutoExport")
@@ -75,6 +77,52 @@ COLLECT_PROGRESS_TIMEOUT = 600
 IDLE_SETTLE_SECONDS = 4
 
 
+EXPORT_HUNG_TIMEOUT = 6
+
+
+class _ExportResponsivenessMonitor:
+    def __init__(self):
+        self.not_responding_since = None
+        self.next_check_at = None
+
+    def check(self):
+        now = time.monotonic()
+        if self.next_check_at is not None and now < self.next_check_at:
+            return True
+        self.next_check_at = now + 1
+
+        main = ableton_state.main_window()
+        if main is None or not main.hung:
+            if self.not_responding_since is not None:
+                logger.info(
+                    "Ableton responded again during export after %.1fs",
+                    now - self.not_responding_since,
+                )
+            self.not_responding_since = None
+            return True
+
+        if self.not_responding_since is None:
+            self.not_responding_since = now
+            logger.warning(
+                "Ableton is not responding during export; waiting up to %ss",
+                EXPORT_HUNG_TIMEOUT,
+            )
+            return True
+
+        elapsed = now - self.not_responding_since
+        if elapsed < EXPORT_HUNG_TIMEOUT:
+            return True
+
+        logger.error(
+            "Ableton has not responded for %.1fs during export; "
+            "killing Ableton and skipping this task",
+            elapsed,
+        )
+        if not ableton_state.kill_ableton():
+            logger.error("Could not kill unresponsive Ableton after export timeout")
+        return False
+
+
 def click_centre_and_zoom_out():
     # Click center
     center = get_ableton_window_center()
@@ -84,7 +132,7 @@ def click_centre_and_zoom_out():
         time.sleep(0.1)
         pyautogui.click(x, y)
     else:
-        logger.info("Could not get Ableton window center to click")
+        logger.debug("Could not get Ableton window center to click")
 
     # Zoom out
     for _ in range(3):
@@ -112,7 +160,7 @@ def open_export_window():
             if win_activate("Export Audio/Video") is None:
                 logger.error("Export dialog appeared but could not be activated")
                 return False
-            logger.info("Export window opened and activated")
+            logger.debug("Export window opened and activated")
             return True
         time.sleep(0.2)
     logger.error("Export window did not appear within 30 seconds")
@@ -161,7 +209,7 @@ def move_main_mp3(export_path, base_name, previous=None, timeout=60):
         asd = f"{src}.asd"
         if os.path.exists(asd):
             os.replace(asd, f"{dst}.asd")
-        logger.info(f"Moved MP3 to: {dst}")
+        logger.debug(f"Moved MP3 to: {dst}")
         return True
     except OSError as e:
         logger.warning(f"Could not move MP3 '{src}' to {folder}: {e}")
@@ -201,7 +249,7 @@ def prepare_main_wet_dry(set):
     if devices is None:
         return False, None
     if not devices:
-        logger.info("Wet+Dry: main track has no devices - doing a normal main export")
+        logger.debug("Wet+Dry: main track has no devices - doing a normal main export")
         return True, None
 
     enabled = enable_main_devices_named(set, FORCE_ON_MAIN_DEVICE_TEXT)
@@ -209,17 +257,17 @@ def prepare_main_wet_dry(set):
         return False, None
     if enabled:
         ableton_state.mark_unsaveable_changes()
-        logger.info(f"Wet+Dry: switched on {enabled} for the wet main export")
+        logger.debug(f"Wet+Dry: switched on {enabled} for the wet main export")
 
     effects = get_enabled_main_effects(set)
     if effects is None:
         return False, None
     if not effects:
-        logger.info("Wet+Dry: no main track effects are switched on - doing a normal main export")
+        logger.debug("Wet+Dry: no main track effects are switched on - doing a normal main export")
         return True, None
 
     suffix = main_effects_suffix(effects)
-    logger.info(f"Wet+Dry: main effects on for the wet export: {effects} -> suffix '{suffix}'")
+    logger.debug(f"Wet+Dry: main effects on for the wet export: {effects} -> suffix '{suffix}'")
     return True, suffix
 
 
@@ -233,7 +281,7 @@ def close_export_window_if_open(timeout=10):
             return False
         win_activate("Export Audio/Video")
         pyautogui.press('esc')
-        logger.info("Sent Esc to close the export window")
+        logger.debug("Sent Esc to close the export window")
         time.sleep(0.5)
     return True
 
@@ -299,7 +347,7 @@ def select_render_target(index, label, state=None):
         time.sleep(0.15)
     pyautogui.press('enter')
     time.sleep(0.2)
-    logger.info(f"Selected render target: {label}")
+    logger.debug(f"Selected render target: {label}")
 
 
 def click_verified_export_button():
@@ -325,7 +373,7 @@ def click_verified_export_button():
             logger.error("Save Audio File As did not appear after clicking Export")
             return False
         time.sleep(0.2)
-    logger.info("Clicked verified Export button; Save Audio File As appeared")
+    logger.debug("Clicked verified Export button; Save Audio File As appeared")
     return True
 
 
@@ -357,12 +405,13 @@ def set_render_range(state, render_range):
         pyautogui.click(point)
         for index, part in enumerate(parts):
             pyautogui.hotkey('ctrl', 'a')
+            ensure_caps_lock_off()  # digits are safe either way; keep state clean
             pyautogui.write(str(part))
             if index < 2:
                 pyautogui.press('tab')
         pyautogui.press('enter')
 
-    logger.info("Set render start %s and length %s",
+    logger.debug("Set render start %s and length %s",
                 expected["Render Start"], expected["Render Length"])
     return _reset_export_dialog_focus(state)
 
@@ -370,18 +419,37 @@ def set_render_range(state, render_range):
 def render_file_snapshot(export_path, expected_base, individual_tracks):
     if not os.path.isdir(export_path):
         return {}
+    # Compare case-insensitively: Windows filenames are case-insensitive and
+    # a past session has saved case-inverted names (e.g. "bONTEMPI mIXDOWN")
+    # when Caps Lock was on during typing - matching must not depend on case.
+    base_lower = expected_base.lower()
     files = {}
     with os.scandir(export_path) as entries:
         for entry in entries:
-            if (entry.is_file() and entry.name.lower().endswith(".wav")
-                    and ((individual_tracks and entry.name.startswith(expected_base + " "))
-                         or (not individual_tracks and entry.name == expected_base + ".wav"))):
+            name_lower = entry.name.lower()
+            if (entry.is_file() and name_lower.endswith(".wav")
+                    and ((individual_tracks and name_lower.startswith(base_lower + " "))
+                         or (not individual_tracks and name_lower == base_lower + ".wav"))):
                 stat = entry.stat()
                 files[entry.name] = (stat.st_mtime_ns, stat.st_size)
     return files
 
 
-def wait_for_render(export_path, expected_base, individual_tracks, previous_files):
+def render_duration_seconds(render_range, tempo):
+    """Approximate audio length in seconds of a (start_tick, end_tick) range.
+
+    Used only to size the post-render file-wait timeout, so a missing or
+    unknown tempo just yields None and the caller falls back to the default.
+    """
+    if not render_range or not tempo:
+        return None
+    seconds = ((render_range[1] - render_range[0]) / TICKS_PER_BEAT) * (60.0 / float(tempo))
+    return seconds if seconds > 0 else None
+
+
+def wait_for_render(export_path, expected_base, individual_tracks, previous_files, render_duration=None):
+    responsiveness = _ExportResponsivenessMonitor()
+
     def has_fresh_output():
         return any(
             previous_files.get(name) != details
@@ -391,28 +459,109 @@ def wait_for_render(export_path, expected_base, individual_tracks, previous_file
         )
 
     start = time.monotonic()
-    while not win_exists("Export Audio...") and not has_fresh_output():
+    while True:
+        if not responsiveness.check():
+            return False
+        if win_exists("Export Audio...") or has_fresh_output():
+            break
         if time.monotonic() - start > 30:
             logger.error("Render did not start or create output for %s", expected_base)
             return False
         time.sleep(0.2)
-    while win_exists("Export Audio..."):
-        time.sleep(1)
+    while True:
+        if not responsiveness.check():
+            return False
+        if not win_exists("Export Audio..."):
+            break
+        time.sleep(0.2)
     start = time.monotonic()
+    # The dialog closing only means rendering started - the file appears after
+    # the whole range has rendered, so wait twice the estimated range length
+    # (with the original 15s floor when no duration was provided).
+    timeout = 15 if render_duration is None else max(15, render_duration * 2)
     while not has_fresh_output():
-        if time.monotonic() - start > 15:
+        if not responsiveness.check():
+            return False
+        if time.monotonic() - start > timeout:
             logger.error("Render finished without expected WAV for %s", expected_base)
             return False
         time.sleep(0.2)
     return wait_for_finished_files(
         lambda: render_file_snapshot(export_path, expected_base, individual_tracks),
         export_path,
+        abort_check=responsiveness.check,
     )
+
+
+def apply_audio_settings(state, audio, debug_name=None):
+    """Drive the Export dialog's audio-format dropdowns to the requested settings.
+
+    `state` is an already-captured ExportWindowState (the dropdown box
+    coordinates are positional and stable across the dialog, so one snapshot
+    serves all four dropdowns). `audio` is an audio_settings.AudioSettings or a
+    plain dict with the keys sample_rate / bit_depth / file_type / dither; a
+    value of None means "leave it alone".
+
+    Dither is deliberately skipped when Bit Depth is 32: Ableton greys the
+    Dither dropdown out there, so clicking it can't change anything and would
+    only log a spurious failure.
+
+    Returns {"ok": bool, "failed": [...], "results": {key: set_dropdown_result}}.
+    A missing/unreadable `state` is reported through the failed list rather than
+    raised, so the caller can decide whether to abort.
+    """
+    if audio is None:
+        return {"ok": True, "skipped": True, "failed": [], "results": {}}
+
+    if isinstance(audio, audio_settings.AudioSettings):
+        values = {
+            "sample_rate": audio.sample_rate,
+            "bit_depth": audio.bit_depth,
+            "file_type": audio.file_type,
+            "dither": audio.dither if audio.dither_enabled() else None,
+        }
+    else:
+        values = {
+            "sample_rate": (audio or {}).get("sample_rate"),
+            "bit_depth": (audio or {}).get("bit_depth"),
+            "file_type": (audio or {}).get("file_type"),
+            "dither": (audio or {}).get("dither"),
+        }
+
+    # Belt-and-braces: even if a caller passes dither directly, 32-bit has no
+    # dither, so never try to move that dropdown at 32.
+    if str(values.get("bit_depth")) == "32":
+        values["dither"] = None
+
+    if state is None:
+        return {"ok": False, "failed": list(audio_settings.DROPDOWN_KEYS),
+                "results": {}, "error": "no export dialog state"}
+
+    results, failed = {}, []
+    for key in audio_settings.DROPDOWN_KEYS:
+        target = values.get(key)
+        if target is None:
+            continue
+        options = audio_settings.OPTIONS[key]
+        result = set_dropdown(
+            key, str(target), options, debug_name=debug_name, state=state
+        )
+        results[key] = result
+        if not (result and result.get("ok")):
+            label = audio_settings.DROPDOWN_LABELS.get(key, key) if hasattr(
+                audio_settings, "DROPDOWN_LABELS") else key
+            logger.error(
+                f"Could not confirm audio setting '{key}' is '{target}'"
+            )
+            failed.append(key)
+
+    return {"ok": not failed, "failed": failed, "results": results}
 
 
 def prepare_export_dialog(render_target_index, render_target_label,
                           include_return_and_main_effects=None, render_range=None,
-                          normalize=None, debug_name=None, commit=True, encode_mp3=None):
+                          normalize=None, debug_name=None, commit=True, encode_mp3=None,
+                          audio=None):
     """
     Select the render target, visually confirm the open Export dialog matches
     what was asked for, force the required toggles, then commit the dialog.
@@ -436,7 +585,7 @@ def prepare_export_dialog(render_target_index, render_target_label,
         # Master and disables the toggle accordingly, so trying to force it
         # on here just clicks a control that can never change and logs a
         # spurious failure.
-        logger.info(
+        logger.debug(
             "Rendering Master - 'Include Return and Main Effects' is implicit "
             "and can't be toggled, skipping it"
         )
@@ -469,7 +618,7 @@ def prepare_export_dialog(render_target_index, render_target_label,
     elif match is None:
         logger.warning(f"Could not read the Rendered Track dropdown (wanted {render_target_label})")
     else:
-        logger.info(f"Verified render target is '{state.rendered_track}'")
+        logger.debug(f"Verified render target is '{state.rendered_track}'")
 
     result = apply_toggles(
         {
@@ -486,6 +635,17 @@ def prepare_export_dialog(render_target_index, render_target_label,
         logger.warning(f"Could not confirm 'Encode MP3' is {'On' if encode_mp3 else 'Off'}")
 
     final_state = result["state"] if result else state
+
+    # Drive the audio-format dropdowns (Sample Rate / Bit Depth / File Type /
+    # Dither) on the SAME dialog snapshot. A failure to confirm them is logged
+    # but does not abort, matching the Encode MP3 handling - the render itself
+    # still produces output, just possibly not in the exact requested format.
+    audio_result = apply_audio_settings(final_state, audio, debug_name=debug_name)
+    if not audio_result.get("ok") and not audio_result.get("skipped"):
+        logger.warning(
+            f"Could not confirm audio settings {audio_result.get('failed')} - "
+            f"the export may use unexpected format settings"
+        )
 
     if render_range is not None and not set_render_range(final_state, render_range):
         return False
@@ -541,12 +701,12 @@ def is_silent_audio(file_path, threshold_db=-60):
             return True
         
         silence_percentage = (silent_frames / total_frames) * 100
-        logger.info(f"  Audio silence: {silence_percentage:.1f}%")
+        logger.debug(f"  Audio silence: {silence_percentage:.1f}%")
         
         return silence_percentage >= 100
         
     except Exception as e:
-        logger.info(f"Error analyzing audio file {file_path}: {e}")
+        logger.debug(f"Error analyzing audio file {file_path}: {e}")
         return False
             
 def delete_silent_files_in_folder(folder_path):
@@ -554,42 +714,42 @@ def delete_silent_files_in_folder(folder_path):
     Scan folder for WAV files and delete those that are completely silent (100%).
     """
     if not os.path.exists(folder_path):
-        logger.info(f"Folder does not exist: {folder_path}")
+        logger.debug(f"Folder does not exist: {folder_path}")
         return 0
     
     deleted_count = 0
     wav_files = [f for f in os.listdir(folder_path) if f.endswith('.wav')]
     
     if not wav_files:
-        logger.info(f"No WAV files found in: {folder_path}")
+        logger.debug(f"No WAV files found in: {folder_path}")
         return 0
     
-    logger.info(f"Checking {len(wav_files)} WAV file(s) for complete silence...")
+    logger.debug(f"Checking {len(wav_files)} WAV file(s) for complete silence...")
     
     for wav_file in wav_files:
         file_path = os.path.join(folder_path, wav_file)
-        logger.info(f"Analyzing: {wav_file}")
+        logger.debug(f"Analyzing: {wav_file}")
         
         if is_silent_audio(file_path):
             try:
                 os.remove(file_path)
-                logger.info(f" Deleted completely silent file: {wav_file}")
+                logger.debug(f" Deleted completely silent file: {wav_file}")
                 deleted_count += 1
                 
                 # Also delete associated ASD file if it exists
                 asd_file = f"{file_path}.asd"
                 if os.path.exists(asd_file):
                     os.remove(asd_file)
-                    logger.info(f"Deleted analysis file: {os.path.basename(asd_file)}")
+                    logger.debug(f"Deleted analysis file: {os.path.basename(asd_file)}")
             except Exception as e:
-                logger.info(f"Error deleting {wav_file}: {e}")
+                logger.debug(f"Error deleting {wav_file}: {e}")
         else:
-            logger.info(f"Kept (has audio): {wav_file}")
+            logger.debug(f"Kept (has audio): {wav_file}")
     
     if deleted_count > 0:
-        logger.info(f"Deleted {deleted_count} completely silent file(s)")
+        logger.debug(f"Deleted {deleted_count} completely silent file(s)")
     else:
-        logger.info("No completely silent files found")
+        logger.debug("No completely silent files found")
     
     return deleted_count
 
@@ -612,18 +772,23 @@ def move_and_rename_main_mix(export_path, original_name, tempo, project_date, ex
         main_mix_folder = get_main_mix_export_folder()
         if not os.path.exists(main_mix_folder):
             os.makedirs(main_mix_folder)
-            logger.info(f"Created main mix folder: {main_mix_folder}")
+            logger.debug(f"Created main mix folder: {main_mix_folder}")
         
         wav_files = [f for f in os.listdir(export_path) if f.endswith('.wav')]
         
         if not wav_files:
-            logger.info(f"No WAV files found in: {export_path}")
+            logger.debug(f"No WAV files found in: {export_path}")
             return False
         
         if expected_base:
-            main_mix_file = f"{expected_base}.wav"
-            if main_mix_file not in wav_files:
-                logger.info(
+            # Case-insensitive match: Windows FS is case-insensitive and old
+            # runs could save mangled-case names (Caps Lock during typing).
+            main_mix_file = next(
+                (f for f in wav_files if f.lower() == f"{expected_base.lower()}.wav"),
+                None,
+            )
+            if main_mix_file is None:
+                logger.debug(
                     f"No main mix file named '{main_mix_file}' in {export_path} - "
                     f"leaving all {len(wav_files)} rendered file(s) in place"
                 )
@@ -655,17 +820,17 @@ def move_and_rename_main_mix(export_path, original_name, tempo, project_date, ex
         
         final_wav_path = os.path.join(main_mix_folder, new_wav_filename)
         move_rendered_file(old_wav_path, final_wav_path)
-        logger.info(f"Moved main mix to: {final_wav_path}")
+        logger.debug(f"Moved main mix to: {final_wav_path}")
         
         if os.path.exists(old_asd_path):
             final_asd_path = os.path.join(main_mix_folder, new_asd_filename)
             move_rendered_file(old_asd_path, final_asd_path)
-            logger.info(f"Moved analysis file to: {final_asd_path}")
+            logger.debug(f"Moved analysis file to: {final_asd_path}")
         
         return True
         
     except Exception as e:
-        logger.info(f"Error moving/renaming main mix file: {e}")
+        logger.debug(f"Error moving/renaming main mix file: {e}")
         return False
 
 
@@ -682,13 +847,13 @@ def collect_all_and_save(ableton_version):
         pyautogui.press('down')
         time.sleep(0.05)
     pyautogui.press('enter')
-    logger.info("Invoked Collect All and Save from menu")
+    logger.debug("Invoked Collect All and Save from menu")
     time.sleep(0.2)
 
     # Handle specify dialog - press enter to dismiss it. Polled rather than
     # checked once: on a slow disk it can take several seconds to open, and a
     # missed specify dialog stays open and blocks everything after it.
-    logger.info(">>> Waiting for Specify window...")
+    logger.debug(">>> Waiting for Specify window...")
     start_time = time.time()
     specify_detected = False
     while time.time() - start_time < SPECIFY_APPEAR_TIMEOUT:
@@ -703,7 +868,7 @@ def collect_all_and_save(ableton_version):
         )
         return False
     if specify_detected:
-        logger.info("Specify window detected, dismissing...")
+        logger.debug("Specify window detected, dismissing...")
         pyautogui.press('enter')
         time.sleep(0.5)
         
@@ -731,7 +896,7 @@ def collect_all_and_save(ableton_version):
         
         elapsed = time.time() - start_time
         if specify_gone:
-            logger.info(f"Specify window closed (took {elapsed:.1f}s)")
+            logger.debug(f"Specify window closed (took {elapsed:.1f}s)")
         else:
             logger.warning(f"Specify window did not close after {elapsed:.1f}s (timeout)")
     
@@ -743,22 +908,22 @@ def collect_all_and_save(ableton_version):
     # version - save as a new file" popup, starts copying (progress bar), or -
     # with nothing to collect and an up-to-date set - just goes idle. Poll for
     # whichever happens instead of sleeping a fixed 2s and checking once.
-    logger.info(">>> Waiting for Save popup / progress bar / idle...")
+    logger.debug(">>> Waiting for Save popup / progress bar / idle...")
     start_time = time.time()
     detected = False
     clean_since = None
     while time.time() - start_time < SAVE_POPUP_APPEAR_TIMEOUT:
         if detect_save_popup():
             detected = True
-            logger.info(f"Save popup detected (appeared after {time.time() - start_time:.1f}s)")
+            logger.debug(f"Save popup detected (appeared after {time.time() - start_time:.1f}s)")
             break
         if _find_dialog_by_ratio_progress_bar("Ableton Live Window Class", 0.47, 0.50)[0]:
-            logger.info("Progress bar appeared (no save popup)")
+            logger.debug("Progress bar appeared (no save popup)")
             break
         if ableton_state.get_state()["clean"]:
             clean_since = clean_since or time.time()
             if time.time() - clean_since >= IDLE_SETTLE_SECONDS:
-                logger.info("Ableton went idle without a save popup or progress bar")
+                logger.debug("Ableton went idle without a save popup or progress bar")
                 break
         else:
             clean_since = None
@@ -766,7 +931,7 @@ def collect_all_and_save(ableton_version):
     
     if detected:
         pyautogui.press('enter')
-        logger.info("Pressed Enter on save popup")
+        logger.debug("Pressed Enter on save popup")
         time.sleep(0.3)
         if not _wait_for_save_popup_to_close():
             return False
@@ -778,7 +943,7 @@ def collect_all_and_save(ableton_version):
     time.sleep(0.3)
 
     if handle_progress_bar_wait(timeout=COLLECT_PROGRESS_TIMEOUT, appear_timeout=5):
-        logger.info("Collect all progress bar finished")
+        logger.debug("Collect all progress bar finished")
 
     # Success is judged by the end state, not by which dialogs were seen:
     # whatever path Ableton took, it must end up idle on its main window.
@@ -790,7 +955,7 @@ def collect_all_and_save(ableton_version):
         if late_popup_handled or not detect_save_popup():
             return
         late_popup_handled.append(True)
-        logger.info("Late save popup detected - handling")
+        logger.debug("Late save popup detected - handling")
         pyautogui.press('enter')
         time.sleep(0.3)
         if _wait_for_save_popup_to_close():
@@ -803,7 +968,7 @@ def collect_all_and_save(ableton_version):
         label="after Collect All and Save"
     ):
         return False
-    logger.info("Collect All and Save completed")
+    logger.debug("Collect All and Save completed")
     return True
 
 
@@ -818,7 +983,7 @@ def _wait_for_save_popup_to_close(timeout=15):
 
 def export_stems(export_path, project_path, project_date, ableton_version, set,
                  include_return_and_main_effects=True, normalize=False, render_ranges=None,
-                 pass_folder=None, name_suffix=""):
+                 pass_folder=None, name_suffix="", audio=None):
     """Render stems for every cluster. Returns the project's stems folder
     (which may have been renamed to include the BPM), or False on failure.
 
@@ -832,7 +997,7 @@ def export_stems(export_path, project_path, project_date, ableton_version, set,
             export_path, project_path, project_date, ableton_version, set,
             include_return_and_main_effects, normalize, render_range,
             index if len(ranges) > 1 else None,
-            pass_folder=pass_folder, name_suffix=name_suffix,
+            pass_folder=pass_folder, name_suffix=name_suffix, audio=audio,
         )
         if not result:
             return False
@@ -842,8 +1007,8 @@ def export_stems(export_path, project_path, project_date, ableton_version, set,
 
 def _export_stems_range(export_path, project_path, project_date, ableton_version, set,
                         include_return_and_main_effects, normalize, render_range, cluster_index,
-                        pass_folder=None, name_suffix=""):
-    logger.info(">>> EXPORT_STEMS START")
+                        pass_folder=None, name_suffix="", audio=None):
+    logger.debug(">>> EXPORT_STEMS START")
     
 
     #pylive operations
@@ -860,7 +1025,7 @@ def _export_stems_range(export_path, project_path, project_date, ableton_version
     for attempt in range(max_retries):
         try:
             tempo = set.tempo
-            logger.info(f"OSC Connection verified - Queried tempo: {tempo} BPM")
+            logger.debug(f"OSC Connection verified - Queried tempo: {tempo} BPM")
             break
         except Exception as e:
             if attempt < max_retries - 1:
@@ -872,11 +1037,11 @@ def _export_stems_range(export_path, project_path, project_date, ableton_version
                 tempo = None  # Will not be available for naming but export can continue
     
     # Debug: Check scan mode and project structure
-    logger.info(f"  Scanned: {set.scanned}")
-    logger.info(f"  Total tracks: {len(set.tracks)}")
-    logger.info(f"  Total groups: {len(set.groups)}")
+    logger.debug(f"  Scanned: {set.scanned}")
+    logger.debug(f"  Total tracks: {len(set.tracks)}")
+    logger.debug(f"  Total groups: {len(set.groups)}")
     if set.groups:
-        logger.info(f"  Group names: {[g.name for g in set.groups]}")
+        logger.debug(f"  Group names: {[g.name for g in set.groups]}")
 
     # The stems folder was created (in create_export_folders) before Ableton
     # opened, so it couldn't include a BPM segment - tempo is now known, so
@@ -894,7 +1059,7 @@ def _export_stems_range(export_path, project_path, project_date, ableton_version
             new_export_path = resolve_directory_collision(new_export_path)
             try:
                 os.rename(export_path, new_export_path)
-                logger.info(f"Renamed stems folder to include BPM: '{current_folder_name}' -> '{os.path.basename(new_export_path)}'")
+                logger.debug(f"Renamed stems folder to include BPM: '{current_folder_name}' -> '{os.path.basename(new_export_path)}'")
                 export_path = new_export_path
             except Exception as e:
                 logger.warning(f"Could not rename stems folder to include BPM: {e}")
@@ -918,6 +1083,7 @@ def _export_stems_range(export_path, project_path, project_date, ableton_version
         render_range=render_range,
         debug_name="export_stems",
         encode_mp3=False,
+        audio=audio,
     ):
         return False
     time.sleep(0.1)
@@ -928,16 +1094,16 @@ def _export_stems_range(export_path, project_path, project_date, ableton_version
     # Read filename
     save_dlg = get_save_audio_file_as(timeout=10)
     if not save_dlg:
-        logger.info("Could not get Save Audio dialog")
+        logger.debug("Could not get Save Audio dialog")
         return False
     
     current_text = get_filename_from_dialog(save_dlg)
     if not current_text:
-        logger.info("Could not get current filename from Save Audio dialog")
+        logger.debug("Could not get current filename from Save Audio dialog")
         return False
 
     tempo = get_tempo(set)
-    logger.debug(f"Current tempo: {tempo}")
+    logger.debug(f"Current tempo: {tempo} {type(tempo)}")
     project_name = os.path.splitext(os.path.basename(project_path))[0]
     final_text = process_project_name(project_name, tempo, ableton_version)
     if cluster_index is not None:
@@ -945,7 +1111,7 @@ def _export_stems_range(export_path, project_path, project_date, ableton_version
 
     # Set filename
     if not set_text_on_edit_control(save_dlg, final_text):
-        logger.info("Failed to set filename")
+        logger.debug("Failed to set filename")
         return False
 
     time.sleep(0.2)
@@ -965,7 +1131,7 @@ def _export_stems_range(export_path, project_path, project_date, ableton_version
         pyautogui.hotkey('alt', 's')
         logger.debug("Sent Alt+S to save")
     except Exception as e:
-        logger.info(f"Failed to send Alt+S: {e}")
+        logger.debug(f"Failed to send Alt+S: {e}")
 
     time.sleep(0.2)
 
@@ -974,7 +1140,11 @@ def _export_stems_range(export_path, project_path, project_date, ableton_version
     handle_overwrite_confirmation()
     time.sleep(0.2)
 
-    if not wait_for_render(cluster_export_path, final_text, True, previous_files):
+    # Same as the main-mix path: size the post-render wait from the render
+    # range so long stems renders aren't cut off by the default 15s timeout.
+    render_duration = render_duration_seconds(render_range, tempo)
+
+    if not wait_for_render(cluster_export_path, final_text, True, previous_files, render_duration):
         return False
 
     time.sleep(0.2)
@@ -1025,7 +1195,7 @@ def _export_stems_range(export_path, project_path, project_date, ableton_version
 
 def export_main(project_date, ableton_version, set,
                 include_return_and_main_effects=True, normalize=False,
-                project_path=None, render_ranges=None, name_suffix=""):
+                project_path=None, render_ranges=None, name_suffix="", audio=None):
     """Render the main mix for every cluster into MAIN. `name_suffix` is
     appended to each filename (the wet pass of a wet+dry export)."""
     if project_path is None:
@@ -1036,7 +1206,7 @@ def export_main(project_date, ableton_version, set,
         if not _export_main_range(
             project_date, ableton_version, set, include_return_and_main_effects,
             normalize, render_range, index if len(render_ranges) > 1 else None,
-            project_path, name_suffix=name_suffix,
+            project_path, name_suffix=name_suffix, audio=audio,
         ):
             return False
     return True
@@ -1044,11 +1214,11 @@ def export_main(project_date, ableton_version, set,
 
 def _export_main_range(project_date, ableton_version, set,
                        include_return_and_main_effects, normalize, render_range, cluster_index,
-                       project_path, name_suffix=""):
+                       project_path, name_suffix="", audio=None):
     export_path = get_main_mix_export_folder()
     if not os.path.exists(export_path):
         os.makedirs(export_path)
-        logger.info(f"Created export path: {export_path}")
+        logger.debug(f"Created export path: {export_path}")
 
 
 
@@ -1078,6 +1248,7 @@ def _export_main_range(project_date, ableton_version, set,
         render_range=render_range,
         debug_name="export_main",
         encode_mp3=True,
+        audio=audio,
     ):
         return False
     time.sleep(0.1)
@@ -1088,12 +1259,12 @@ def _export_main_range(project_date, ableton_version, set,
     # Read filename
     save_dlg = get_save_audio_file_as(timeout=10)
     if not save_dlg:
-        logger.info("Could not get Save Audio dialog")
+        logger.debug("Could not get Save Audio dialog")
         return False
     
     current_text = get_filename_from_dialog(save_dlg)
     if not current_text:
-        logger.info("Could not get current filename from Save Audio dialog")
+        logger.debug("Could not get current filename from Save Audio dialog")
         return False
 
     tempo = get_tempo(set)
@@ -1111,7 +1282,7 @@ def _export_main_range(project_date, ableton_version, set,
 
     # Set filename
     if not set_text_on_edit_control(save_dlg, final_text):
-        logger.info("Failed to set filename")
+        logger.debug("Failed to set filename")
         return False
 
 
@@ -1127,7 +1298,7 @@ def _export_main_range(project_date, ableton_version, set,
         pyautogui.hotkey('alt', 's')
         logger.debug("Sent Alt+S to save")
     except Exception as e:
-        logger.info(f"Failed to send Alt+S: {e}")
+        logger.debug(f"Failed to send Alt+S: {e}")
 
     time.sleep(2)
 
@@ -1135,7 +1306,14 @@ def _export_main_range(project_date, ableton_version, set,
     handle_overwrite_confirmation()
     time.sleep(0.2)
 
-    if not wait_for_render(export_path, final_text, False, previous_files):
+    # Size the post-render wait from the actual render range: the export
+    # dialog window closes as soon as rendering starts, but the WAV only
+    # appears once the full range has rendered (40-110s for real projects),
+    # so a fixed 15s timeout reported "Render finished without expected WAV".
+    logger.debug("$render range: %s, tempo: %s", render_range, tempo)
+    render_duration = render_duration_seconds(render_range, tempo)
+    
+    if not wait_for_render(export_path, final_text, False, previous_files, render_duration):
         return False
 
     move_main_mp3(export_path, final_text, mp3_previous)

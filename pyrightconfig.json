@@ -1,4 +1,6 @@
 {
+  "typeCheckingMode": "off",
+  "extraPaths": ["app"],
   "exclude": [
     "vendor",
     "_archive",
@@ -6,11 +8,13 @@
     "data",
     "LOGS",
     "debug",
+    "autoexport.venv",
     "**/__pycache__",
-    "**/.venv",
-    "*.venv"
+    "**/.venv"
   ],
   "ignore": [
-    "vendor"
+    "vendor",
+    "_archive",
+    "app/test_scrips"
   ]
 }

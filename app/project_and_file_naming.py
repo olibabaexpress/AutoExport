@@ -12,11 +12,25 @@ import os
 import logging
 from datetime import datetime
 
-from nltk.corpus import stopwords
-
 logger = logging.getLogger("AutoExport")
 
-
+# Fixed English stopword vocabulary; no corpus download is needed for naming.
+ENGLISH_STOPWORDS = frozenset("""
+a about above after again against ain all am an and any are aren aren't as at
+be because been before being below between both but by can couldn couldn't d
+did didn didn't do does doesn doesn't doing don don't down during each few for
+from further had hadn hadn't has hasn hasn't have haven haven't having he he'd
+he'll her here hers herself he's him himself his how i i'd if i'll i'm in into
+is isn isn't it it'd it'll it's its itself i've just ll m ma me mightn mightn't
+more most mustn mustn't my myself needn needn't no nor not now o of off on once
+only or other our ours ourselves out over own re s same shan shan't she she'd
+she'll she's should shouldn shouldn't should've so some such t than that
+that'll the their theirs them themselves then there these they they'd they'll
+they're they've this those through to too under until up ve very was wasn
+wasn't we we'd we'll we're were weren weren't we've what when where which
+while who whom why will with won won't wouldn wouldn't y you you'd you'll
+your you're yours yourself yourselves you've
+""".split())
 
 def append_version_to_filename(filename, ableton_version):
     """Append Ableton version to filename before .als extension."""
@@ -87,18 +101,8 @@ def get_project_modification_date(project_path):
         return datetime.now().strftime("%d-%m-%y")
 
 def remove_stopwords(text):
-    """Remove all common English stopwords from the text using NLTK."""
-    try:
-        stop_words = set(stopwords.words('english'))
-        words = text.lower().split()
-        
-        # Remove all stopwords
-        filtered_words = [word for word in words if word not in stop_words]
-        
-        return ' '.join(filtered_words)
-    except Exception as e:
-        logger.info(f"Error removing stopwords: {e}")
-        return text
+    """Lowercase and remove English stopwords, matching whole whitespace-separated words."""
+    return ' '.join(word for word in text.lower().split() if word not in ENGLISH_STOPWORDS)
 
 def shorten_project_name(current_text):
     """Shorten/clean a raw project name according to the AHK-derived logic,

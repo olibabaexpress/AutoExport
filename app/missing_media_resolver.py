@@ -140,6 +140,37 @@ def _collect_missing_roots(refs):
     return roots
 
 
+def _path_is_within(path, root):
+    """Whether a resolved path is inside the project root."""
+    try:
+        resolved_path = os.path.normcase(os.fspath(Path(path).resolve()))
+        resolved_root = os.path.normcase(os.fspath(Path(root).resolve()))
+        return os.path.commonpath((resolved_path, resolved_root)) == resolved_root
+    except (OSError, ValueError):
+        return False
+
+
+def _collect_external_sample_names(ableton_set, project_path):
+    """Collect sample names whose usable or stored location is outside the project."""
+    project_root = ableton_set.find_project_root_folder() or Path(project_path).parent
+    external_names = []
+    for ref in ableton_set.samples.iterate():
+        if _is_live_pack_ref(ref):
+            external_names.append(ref.name)
+            continue
+
+        if getattr(ref, "relative_exists", False) and ref.relative is not None:
+            sample_path = project_root / ref.relative
+        else:
+            sample_path = ref.absolute
+            if sample_path is None and ref.relative is not None:
+                sample_path = project_root / ref.relative
+
+        if sample_path is not None and not _path_is_within(sample_path, project_root):
+            external_names.append(ref.name)
+    return external_names
+
+
 def _build_name_index(db):
     """
     Group a sample database (path -> {name, size, last_modified}) by sample
@@ -147,21 +178,97 @@ def _build_name_index(db):
     """
     index = {}
     for smp_path, smp_info in db.items():
-        index.setdefault(smp_info.get("name"), []).append((smp_path, smp_info))
+        name = smp_info.get("name")
+        if isinstance(name, str):
+            index.setdefault(name, []).append((smp_path, smp_info))
     return index
 
 
-def _simulate_fix(ableton_set, missing_refs, db, name_index=None):
+def _get_size_verified_candidates(ref, name_index):
+    """Return indexed files whose filename and actual size match a reference."""
+    candidates = []
+    for smp_path, smp_info in name_index.get(ref.name, []):
+        if ref.size is None or ref.size <= 0 or smp_info.get("size") != ref.size:
+            continue
+        source_path = Path(smp_path)
+        try:
+            if not source_path.is_file() or source_path.stat().st_size != ref.size:
+                continue
+        except OSError:
+            continue
+        candidates.append((smp_path, smp_info))
+    return candidates
+
+
+def _unresolved_sample_details(refs, name_index, index_available=True):
+    """Describe unresolved refs and whether the filename exists in the index."""
+    details = []
+    for ref in refs:
+        indexed = name_index.get(ref.name, []) if index_available else []
+        valid = _get_size_verified_candidates(ref, name_index) if index_available else []
+        if not index_available:
+            reason = "index_unavailable"
+        elif not indexed:
+            reason = "not_in_index"
+        elif ref.size is None or ref.size <= 0:
+            reason = "original_size_unavailable"
+        elif valid:
+            reason = "indexed_match_unresolved"
+        elif any(
+            smp_info.get("size") == ref.size
+            for _path, smp_info in indexed
+        ):
+            reason = "indexed_file_unavailable_or_changed"
+        else:
+            reason = "size_mismatch"
+
+        details.append({
+            "name": ref.name,
+            "expected_size": ref.size,
+            "stored_path": str(ref.absolute) if ref.absolute else None,
+            "reason": reason,
+            "indexed_matches": [
+                {"path": str(path), "size": info.get("size")}
+                for path, info in indexed[:5]
+            ],
+            "indexed_match_count": len(indexed),
+        })
+    return details
+
+
+def _size_verified_database(db, refs, name_index):
+    """Prepare an abletoolz database that cannot match on mtime alone."""
+    verified_sizes = {
+        (ref.name, ref.size)
+        for ref in refs
+        if ref.size is not None and ref.size > 0
+    }
+    strict_db = {}
+    for name, size in verified_sizes:
+        for path, info in name_index.get(name, []):
+            if info.get("size") != size:
+                continue
+            source_path = Path(path)
+            try:
+                if not source_path.is_file() or source_path.stat().st_size != size:
+                    continue
+            except OSError:
+                continue
+            strict_info = dict(info)
+            strict_info["last_modified"] = None
+            strict_db[path] = strict_info
+    return strict_db
+
+
+def _simulate_fix(ableton_set, missing_refs, db, name_index=None, mode="collect"):
     """
-    Read-only replay of abletoolz's own SampleRef-matching rules, without
-    copying any files or mutating the parsed document. Mirrors the decision
-    logic in abletoolz.live_set.samples.Samples._fix_one() exactly (strict
-    size-or-mtime match only, same as abletoolz itself - no "unique name"
-    guessing, to avoid false-positive relinks), so dry runs report accurately
-    what a real run would do.
+    Read-only replay of the resolver's safe matching rules without copying
+    files or mutating the parsed document. A candidate must have a matching
+    filename and exact OriginalFileSize; modification time alone is not enough.
 
     Returns:
-        (collected_names, linked_names, still_missing_names, still_missing_refs)
+        (collected_names, linked_names, still_missing_names,
+         still_missing_refs, linked_refs)
         - the first three are lists of sample names, matching the shape
         resolve_missing_media() exposes; the fourth is the underlying
         SampleRef objects, which retain the stored absolute paths needed for
@@ -176,27 +283,20 @@ def _simulate_fix(ableton_set, missing_refs, db, name_index=None):
     linked_names = []
     still_missing_names = []
     still_missing_refs = []
+    linked_refs = []
 
     for ref in missing_refs:
-        candidates = name_index.get(ref.name, [])
-        match_info = None
-        for _smp_path, smp_info in candidates:
-            size_match = ref.size is not None and smp_info.get("size") == ref.size
-            raw_mtime = smp_info.get("last_modified")
-            try:
-                last_mod_int = int(float(raw_mtime)) if raw_mtime is not None else None
-            except (TypeError, ValueError):
-                last_mod_int = None
-            modified_match = (
-                ref.last_modified is not None and last_mod_int is not None and ref.last_modified == last_mod_int
-            )
-            if size_match or modified_match:
-                match_info = smp_info
-                break
+        candidates = _get_size_verified_candidates(ref, name_index)
+        match_info = candidates[0][1] if candidates else None
 
         if match_info is None:
             still_missing_names.append(ref.name)
             still_missing_refs.append(ref)
+            continue
+
+        if mode == "relink":
+            linked_names.append(ref.name)
+            linked_refs.append(ref)
             continue
 
         if not project_root:
@@ -217,13 +317,16 @@ def _simulate_fix(ableton_set, missing_refs, db, name_index=None):
             # Same-name/different-size collision - the collect pass would be
             # blocked, but the link fallback would still resolve it.
             linked_names.append(ref.name)
+            linked_refs.append(ref)
         else:
             collected_names.append(ref.name)
 
-    return collected_names, linked_names, still_missing_names, still_missing_refs
+    return collected_names, linked_names, still_missing_names, still_missing_refs, linked_refs
 
 
-def resolve_missing_media(project_path, db, dry_run=False, name_index=None):
+def resolve_missing_media(
+    project_path, db, dry_run=False, name_index=None, mode="collect"
+):
     """
     Attempt to resolve missing samples in a single .als file using abletoolz.
 
@@ -233,12 +336,14 @@ def resolve_missing_media(project_path, db, dry_run=False, name_index=None):
             If None, only the "check" step runs (no fixing is attempted).
         dry_run: If True, no files are touched at all (no audio files are
             copied into the project, no .als changes are made/saved) - a
-            read-only simulation of abletoolz's own matching rules is used
+            read-only simulation of the resolver's exact-name/size policy is used
             instead so 'fixed'/'fixed_names'/'linked_names' still reflect
             what *would* happen on a real run.
         name_index: Optional pre-built db grouped by sample name (see
-            _build_name_index()). Only used for dry_run - pass this in from
-            resolve_missing_media_bulk() to avoid rebuilding it per project.
+        _build_name_index()). Passed by resolve_missing_media_bulk() to
+        avoid rebuilding it per project.
+        mode: "relink" updates references to indexed absolute paths;
+            "collect" copies matched files into the project before relinking.
 
     Returns:
         dict: {
@@ -254,6 +359,8 @@ def resolve_missing_media(project_path, db, dry_run=False, name_index=None):
                                                # (collect was blocked by a same-name/different-size
                                                # file already present in the project's Samples/Imported)
             'still_missing_names': list[str], # sample names still unresolved
+            'external_sample_refs': int,      # sample references outside the project root
+            'external_sample_names': list[str],
             'pack_skipped': int,              # references Live resolves from an installed Pack
                                                # (excluded from the counts above - see
                                                # _is_live_pack_ref())
@@ -274,10 +381,16 @@ def resolve_missing_media(project_path, db, dry_run=False, name_index=None):
         'fixed_names': [],
         'linked_names': [],
         'still_missing_names': [],
+        'missing_sample_details': [],
+        'external_sample_refs': 0,
+        'external_sample_names': [],
         'pack_skipped': 0,
         'missing_roots': {},
+        'mode': mode,
     }
     try:
+        if mode not in ("relink", "collect"):
+            raise ValueError(f"Unsupported missing-media resolution mode: {mode}")
         als_path = Path(project_path)
         if not als_path.exists():
             result['error'] = f"File not found: {als_path}"
@@ -289,6 +402,12 @@ def resolve_missing_media(project_path, db, dry_run=False, name_index=None):
             return result
 
         ableton_set.find_project_root_folder()
+        name_index = _build_name_index(db) if db is not None else {}
+        analysis_set = ableton_set
+        result['external_sample_names'] = sorted(
+            _collect_external_sample_names(ableton_set, als_path)
+        )
+        result['external_sample_refs'] = len(result['external_sample_names'])
 
         missing_before_refs, pack_refs = _filter_pack_refs(ableton_set.samples.check())
         result['pack_skipped'] = len(pack_refs)
@@ -314,6 +433,9 @@ def resolve_missing_media(project_path, db, dry_run=False, name_index=None):
             result['missing_after'] = result['missing_before']
             result['still_missing_names'] = missing_before_names
             result['missing_roots'] = _collect_missing_roots(missing_before_refs)
+            result['missing_sample_details'] = _unresolved_sample_details(
+                missing_before_refs, name_index, index_available=False
+            )
             return result
 
         logger.info(
@@ -322,27 +444,68 @@ def resolve_missing_media(project_path, db, dry_run=False, name_index=None):
         )
 
         if dry_run:
-            # Read-only simulation: abletoolz's own fix(collect_and_save=True)
-            # actually copies matched audio files to disk as a side effect,
-            # even if save_set() is never called - so a real dry run must
-            # avoid invoking it at all and instead replay its matching rules
-            # without touching the filesystem.
-            collected_names, linked_names, still_missing_names, still_missing_refs = _simulate_fix(
-                ableton_set, missing_before_refs, db, name_index=name_index
+            # abletoolz's fix(collect_and_save=True) copies matched audio files
+            # even if save_set() is never called, so previews use the same
+            # exact-name/size policy without invoking the mutating fixer.
+            (
+                collected_names,
+                linked_names,
+                still_missing_names,
+                still_missing_refs,
+                _linked_refs,
+            ) = _simulate_fix(
+                ableton_set, missing_before_refs, db, name_index=name_index,
+                mode=mode,
             )
             fixed_names = collected_names
+            if mode == "relink":
+                fixed_names = []
             result['would_save'] = bool(collected_names or linked_names)
             result['missing_roots'] = _collect_missing_roots(still_missing_refs)
+            result['missing_sample_details'] = _unresolved_sample_details(
+                still_missing_refs, name_index
+            )
         else:
             # Predict the collect/link split up front using the same
             # read-only matching rules abletoolz itself applies - this is
             # used only for the human-readable breakdown below, not for the
             # ground-truth missing count (see re-parse note further down).
-            predicted_collected, predicted_linked, _predicted_missing, _predicted_refs = _simulate_fix(
-                ableton_set, missing_before_refs, db, name_index=name_index
+            (
+                predicted_collected,
+                predicted_linked,
+                _predicted_missing,
+                _predicted_refs,
+                linked_refs,
+            ) = _simulate_fix(
+                ableton_set, missing_before_refs, db, name_index=name_index,
+                mode=mode,
             )
 
-            did_fix_collect = ableton_set.samples.fix(db, collect_and_save=True)
+            strict_db = _size_verified_database(
+                db, missing_before_refs, name_index
+            )
+            did_fix_collect = False
+            did_fix_link = False
+            sample_cache = getattr(ableton_set.samples, "_cache", None)
+            if mode == "relink":
+                matched_refs = [
+                    ref for ref in missing_before_refs
+                    if _get_size_verified_candidates(ref, name_index)
+                ]
+                if matched_refs and sample_cache is not None:
+                    ableton_set.samples._cache = matched_refs
+                    try:
+                        did_fix_link = ableton_set.samples.fix(
+                            strict_db, collect_and_save=False
+                        )
+                    finally:
+                        ableton_set.samples._cache = sample_cache
+            else:
+                did_fix_collect = (
+                    ableton_set.samples.fix(strict_db, collect_and_save=True)
+                    if strict_db
+                    else False
+                )
 
             # Second pass: anything still missing after the collect-and-save
             # attempt is likely blocked because the project's own
@@ -350,7 +513,14 @@ def resolve_missing_media(project_path, db, dry_run=False, name_index=None):
             # with a different size (abletoolz refuses to overwrite it).
             # Fall back to linking the absolute path instead - this resolves
             # the reference without touching the conflicting file.
-            did_fix_link = ableton_set.samples.fix(db, collect_and_save=False)
+            if mode == "collect" and linked_refs and sample_cache is not None:
+                ableton_set.samples._cache = linked_refs
+                try:
+                    did_fix_link = ableton_set.samples.fix(
+                        strict_db, collect_and_save=False
+                    )
+                finally:
+                    ableton_set.samples._cache = sample_cache
 
             result['would_save'] = bool(did_fix_collect or did_fix_link)
 
@@ -372,6 +542,7 @@ def resolve_missing_media(project_path, db, dry_run=False, name_index=None):
                 reparsed = AbletonSet(als_path)
                 if reparsed.parse():
                     reparsed.find_project_root_folder()
+                    analysis_set = reparsed
                     missing_after_refs, _ = _filter_pack_refs(reparsed.samples.check())
                 else:
                     logger.warning(
@@ -385,30 +556,32 @@ def resolve_missing_media(project_path, db, dry_run=False, name_index=None):
             missing_after_names = [ref.name for ref in missing_after_refs]
             still_missing_names = sorted(missing_after_names)
             result['missing_roots'] = _collect_missing_roots(missing_after_refs)
+            result['missing_sample_details'] = _unresolved_sample_details(
+                missing_after_refs, name_index
+            )
 
-            # Attribute the ground-truth fixed count to the predicted
-            # collect/link split for the report, capping each bucket to what
-            # was actually resolved so the two always add up correctly.
+            # Attribute fixes to their execution mode, capped to the actual
+            # count verified by re-parsing the saved set.
             actually_fixed = Counter(missing_before_names) - Counter(missing_after_names)
             remaining = Counter(actually_fixed)
             collected_final = Counter()
             linked_final = Counter()
-            for name, count in Counter(predicted_collected).items():
-                take = min(count, remaining.get(name, 0))
-                if take:
-                    collected_final[name] += take
-                    remaining[name] -= take
-            for name, count in Counter(predicted_linked).items():
-                take = min(count, remaining.get(name, 0))
-                if take:
-                    linked_final[name] += take
-                    remaining[name] -= take
-            # Anything fixed that our prediction didn't anticipate (edge
-            # case) is still counted as fixed - just bucketed as "collected"
-            # since that's the default/primary path.
-            for name, count in remaining.items():
-                if count > 0:
-                    collected_final[name] += count
+            if mode == "relink":
+                linked_final = remaining
+            else:
+                for name, count in Counter(predicted_collected).items():
+                    take = min(count, remaining.get(name, 0))
+                    if take:
+                        collected_final[name] += take
+                        remaining[name] -= take
+                for name, count in Counter(predicted_linked).items():
+                    take = min(count, remaining.get(name, 0))
+                    if take:
+                        linked_final[name] += take
+                        remaining[name] -= take
+                for name, count in remaining.items():
+                    if count > 0:
+                        collected_final[name] += count
 
             fixed_names = sorted(collected_final.elements())
             linked_names = sorted(linked_final.elements())
@@ -418,17 +591,21 @@ def resolve_missing_media(project_path, db, dry_run=False, name_index=None):
         result['fixed_names'] = fixed_names
         result['linked_names'] = linked_names
         result['still_missing_names'] = still_missing_names
+        result['external_sample_names'] = sorted(
+            _collect_external_sample_names(analysis_set, als_path)
+        )
+        result['external_sample_refs'] = len(result['external_sample_names'])
 
         if result['would_save'] and not dry_run:
             logger.info(
-                f"[abletoolz] {als_path.name}: fixed {result['fixed']} sample reference(s) "
+                f"[abletoolz] {als_path.name}: {mode} fixed {result['fixed']} sample reference(s) "
                 f"({len(result['fixed_names'])} collected, {len(result['linked_names'])} linked by "
-                "absolute path due to name collisions), saved set (original backed up automatically "
+                "absolute path), saved set (original backed up automatically "
                 "under abletoolz_backup/)."
             )
         elif result['would_save'] and dry_run:
             logger.info(
-                f"[abletoolz] {als_path.name}: DRY RUN - would fix {result['fixed']} sample reference(s) "
+                f"[abletoolz] {als_path.name}: DRY RUN - {mode} would fix {result['fixed']} sample reference(s) "
                 f"({len(result['fixed_names'])} collected, {len(result['linked_names'])} linked), "
                 "nothing written to disk."
             )
@@ -443,7 +620,17 @@ def resolve_missing_media(project_path, db, dry_run=False, name_index=None):
         return result
 
 
-def resolve_missing_media_bulk(project_paths, db, progress_callback=None, dry_run=False):
+def resolve_missing_media_bulk(
+    project_paths,
+    db,
+    progress_callback=None,
+    dry_run=False,
+    pause_requested=None,
+    progress_offset=0,
+    total_count=None,
+    stop_requested=None,
+    mode="collect",
+):
     """
     Run resolve_missing_media() over a batch of .als files up front, before any
     of them are opened in Ableton.
@@ -454,6 +641,15 @@ def resolve_missing_media_bulk(project_paths, db, progress_callback=None, dry_ru
         progress_callback: Optional callable(message: str) for status updates.
         dry_run: If True, no .als files are modified - the report shows what
             *would* be fixed so it can be reviewed before committing.
+        pause_requested: Optional threading.Event checked between projects.
+            A pause waits for the current project to finish, then returns the
+            results completed by this invocation.
+        stop_requested: Optional threading.Event checked between projects.
+            A stop finishes the current project before returning partial results.
+        progress_offset: Number of projects completed by previous invocations.
+        total_count: Total project count across pause/resume invocations.
+        mode: "relink" to update references to indexed files without copying,
+            or "collect" to copy indexed media into the project.
 
     Returns:
         dict mapping project_path -> result dict (see resolve_missing_media()).
@@ -461,19 +657,33 @@ def resolve_missing_media_bulk(project_paths, db, progress_callback=None, dry_ru
     results = {}
     project_paths = list(project_paths)
     total = len(project_paths)
+    display_total = total if total_count is None else total_count
+    paused = False
+    stopped = False
 
     if db is None and progress_callback:
         progress_callback("No sample database loaded - missing media will only be checked, not fixed. Build the index from Sample Library... first.")
     if dry_run and progress_callback:
         progress_callback("DRY RUN mode - no files will be modified.")
 
-    name_index = _build_name_index(db) if (dry_run and db) else None
+    name_index = _build_name_index(db) if db is not None else None
 
     for i, project_path in enumerate(project_paths, 1):
+        if stop_requested is not None and stop_requested.is_set():
+            stopped = True
+            break
+        if pause_requested is not None and pause_requested.is_set():
+            paused = True
+            break
         name = Path(project_path).name
         if progress_callback:
-            progress_callback(f"[{i}/{total}] Checking {name}...")
-        result = resolve_missing_media(project_path, db, dry_run=dry_run, name_index=name_index)
+            progress_callback(
+                f"[{progress_offset + i}/{display_total}] Checking {name}..."
+            )
+        result = resolve_missing_media(
+            project_path, db, dry_run=dry_run, name_index=name_index,
+            mode=mode,
+        )
         results[project_path] = result
 
         if progress_callback:
@@ -487,10 +697,32 @@ def resolve_missing_media_bulk(project_paths, db, progress_callback=None, dry_ru
                     f"{result['missing_after']} still missing"
                 )
 
+    if stop_requested is not None and stop_requested.is_set() and len(results) < total:
+        stopped = True
+    if stopped:
+        if progress_callback:
+            progress_callback(
+                f"Stopped after {progress_offset + len(results)}/{display_total} "
+                "projects. The current project is complete."
+            )
+        return results
+
+    if paused:
+        if progress_callback:
+            progress_callback(
+                f"Paused after {progress_offset + len(results)}/{display_total} "
+                "projects. The current project is complete."
+            )
+        return results
+
     total_missing_before = sum(r['missing_before'] for r in results.values())
     total_fixed = sum(r['fixed'] for r in results.values())
     total_still_missing = sum(r['missing_after'] for r in results.values())
-    mode_word = "would fix" if dry_run else "fixed"
+    mode_word = (
+        "would fix" if dry_run
+        else "relinked" if mode == "relink"
+        else "fixed"
+    )
     logger.info(
         f"[abletoolz] Bulk resolve complete: {total} project(s) checked, "
         f"{total_missing_before} missing sample reference(s) found, "
@@ -505,7 +737,7 @@ def resolve_missing_media_bulk(project_paths, db, progress_callback=None, dry_ru
     return results
 
 
-def format_bulk_report(results, dry_run=False):
+def format_bulk_report(results, dry_run=False, mode=None):
     """
     Turn resolve_missing_media_bulk()'s results dict into a human-readable
     text report suitable for display in the GUI or saving to a file.
@@ -514,6 +746,7 @@ def format_bulk_report(results, dry_run=False):
         results: dict mapping project_path -> result dict.
         dry_run: If True, labels the report as a preview and describes fixes
             as "would fix" rather than "fixed" (nothing was written to disk).
+        mode: "relink" or "collect"; inferred from results when omitted.
 
     Returns:
         str report text.
@@ -529,7 +762,14 @@ def format_bulk_report(results, dry_run=False):
     unique_still_missing = len({n for r in results.values() for n in r['still_missing_names']})
 
     lines.append("=" * 70)
-    lines.append("MISSING MEDIA BULK FIX REPORT" + ("  (DRY RUN - PREVIEW ONLY)" if dry_run else ""))
+    mode = mode or next(
+        (result.get("mode") for result in results.values() if result.get("mode")),
+        "collect",
+    )
+    lines.append(
+        f"MISSING MEDIA SCAN & {mode.upper()} REPORT"
+        + ("  (DRY RUN - PREVIEW ONLY)" if dry_run else "")
+    )
     lines.append("=" * 70)
     if dry_run:
         lines.append("No files were modified. This is a preview of what 'Apply Fixes' would do.")
@@ -537,9 +777,13 @@ def format_bulk_report(results, dry_run=False):
     lines.append(f"Projects with no issues: {total_clean}")
     lines.append(f"Projects with errors:    {total_errors}")
     lines.append(f"Missing samples found:   {total_missing_before}")
-    lines.append(f"Samples {'that would be fixed' if dry_run else 'fixed/relinked'}:  {total_fixed}")
+    action_word = "relinked" if mode == "relink" else "collected/relinked"
+    lines.append(
+        f"Samples {'that would be fixed' if dry_run else action_word}:  "
+        f"{total_fixed}"
+    )
     total_linked = sum(len(r.get('linked_names', [])) for r in results.values())
-    if total_linked:
+    if total_linked and mode == "collect":
         word = "would be" if dry_run else "were"
         lines.append(
             f"  (of which {total_linked} {word} linked by absolute path, not collected, because a "
@@ -601,8 +845,9 @@ def format_bulk_report(results, dry_run=False):
                 lines.append(f"      {name}")
         lines.append("")
     if online_roots:
-        lines.append("ONLINE - these volumes are mounted, so the samples really are gone from")
-        lines.append("the stored path and were not found anywhere in the sample index.")
+        lines.append("ONLINE - these volumes are mounted, but the samples do not resolve")
+        lines.append("from their stored paths. The index may not contain them, or its")
+        lines.append("same-name candidates may not match the stored OriginalFileSize.")
         lines.append("")
         for root in sorted(online_roots):
             entry = online_roots[root]
@@ -653,7 +898,11 @@ def format_bulk_report(results, dry_run=False):
         else:
             unique = len(set(r['still_missing_names']))
             status = f"{unique} FILE(S) STILL MISSING / {r['missing_after']} refs"
-        fixed_word = "would fix" if dry_run else "fixed"
+        fixed_word = (
+            "would fix" if dry_run
+            else "relinked" if mode == "relink"
+            else "fixed"
+        )
         lines.append(f"[{status}] {name}  ({r['fixed']}/{r['missing_before']} refs {fixed_word})")
         project_roots = r.get('missing_roots') or {}
         if project_roots:
@@ -662,8 +911,12 @@ def format_bulk_report(results, dry_run=False):
                 for root, info in sorted(project_roots.items())
             ]
             lines.append(f"    Volumes needed:   {', '.join(rendered)}")
-        fixed_label = "OK would collect: " if dry_run else "OK collected:     "
-        linked_label = "-- would link:    " if dry_run else "-- linked (abs):  "
+        if mode == "relink":
+            fixed_label = "OK would relink:  " if dry_run else "OK relinked:      "
+            linked_label = fixed_label
+        else:
+            fixed_label = "OK would collect: " if dry_run else "OK collected:     "
+            linked_label = "-- would link:    " if dry_run else "-- linked (abs):  "
         for sample_name, count in sorted(Counter(r['fixed_names']).items()):
             suffix = f"  (x{count})" if count > 1 else ""
             lines.append(f"    {fixed_label}{sample_name}{suffix}")
@@ -672,7 +925,35 @@ def format_bulk_report(results, dry_run=False):
             lines.append(f"    {linked_label}{sample_name}{suffix}")
         for sample_name, count in sorted(Counter(r['still_missing_names']).items()):
             suffix = f"  (x{count})" if count > 1 else ""
-            lines.append(f"    XX still missing: {sample_name}{suffix}")
+            detail = next(
+                (
+                    item for item in r.get('missing_sample_details', [])
+                    if item.get('name') == sample_name
+                ),
+                None,
+            )
+            reason = detail.get("reason") if detail else None
+            reason_text = {
+                "not_in_index": "filename not in sample index",
+                "size_mismatch": "same filename indexed, but OriginalFileSize differs",
+                "original_size_unavailable": "project has no usable OriginalFileSize",
+                "indexed_file_unavailable_or_changed": "indexed file is missing or changed",
+                "index_unavailable": "sample index unavailable",
+            }.get(reason)
+            suffix_text = f" [{reason_text}]" if reason_text else ""
+            lines.append(
+                f"    XX still missing: {sample_name}{suffix}{suffix_text}"
+            )
+            if reason == "size_mismatch":
+                sizes = sorted({
+                    str(item.get("size"))
+                    for item in detail.get("indexed_matches", [])
+                })
+                if sizes:
+                    lines.append(
+                        f"       Project size: {detail.get('expected_size')} bytes; "
+                        f"indexed size(s): {', '.join(sizes)} bytes"
+                    )
         lines.append("")
 
     clean_projects = [Path(p).name for p, r in results.items() if r['success'] and r['missing_before'] == 0]

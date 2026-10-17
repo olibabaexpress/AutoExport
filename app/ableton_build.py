@@ -28,6 +28,7 @@ import logging
 import os
 import re
 from pathlib import Path
+from xml.etree import ElementTree as ET
 
 import app_config
 
@@ -373,14 +374,26 @@ def user_library_path(build_key=None):
                     # Prefer the matching channel, then the newest version.
                     dirs.append(((parsed[3] is not None) == want_beta, _version_sort_key(parsed), cfg))
         for _match, _ver, cfg in sorted(dirs, reverse=True):
-            text = cfg.read_text(encoding="utf-8", errors="replace")
-            block = re.search(r"<UserLibrary>(.*?)</UserLibrary>", text, re.S)
-            path_m = re.search(r'<ProjectPath Value="([^"]*)"', block.group(1)) if block else None
-            name_m = re.search(r'<ProjectName Value="([^"]*)"', block.group(1)) if block else None
-            if path_m and path_m.group(1):
-                lib = os.path.normpath(os.path.join(path_m.group(1), name_m.group(1) if name_m else "User Library"))
-                return lib
-    except OSError:
-        pass
+            try:
+                user_library = ET.parse(cfg).find(".//UserLibrary")
+            except (OSError, ET.ParseError) as error:
+                logger.warning(f"Could not read Ableton User Library preferences from {cfg}: {error}")
+                continue
+            if user_library is None:
+                continue
+            project_path = user_library.find(".//ProjectPath")
+            project_name = user_library.find(".//ProjectName")
+            path = project_path.get("Value") if project_path is not None else None
+            name = project_name.get("Value", "User Library") if project_name is not None else "User Library"
+            if path:
+                library = os.path.normpath(os.path.join(path, name))
+                if os.path.isdir(library):
+                    return library
+                logger.warning(f"User Library from {cfg} does not exist: {library}")
+    except OSError as error:
+        logger.warning(f"Could not inspect Ableton preferences in {ABLETON_APPDATA}: {error}")
+    saved = app_config.get("user_library_path")
+    if saved and os.path.isdir(saved):
+        return os.path.normpath(saved)
     default = Path.home() / "Documents" / "Ableton" / "User Library"
     return str(default) if default.is_dir() else None

@@ -17,13 +17,14 @@ import logging
 import pyautogui
 from pywinauto import Desktop
 
-from window_utils import win_exists, win_close, win_activate_ableton, _find_window_element
+from window_utils import win_exists, win_close, win_activate_ableton, _find_window_element, ensure_caps_lock_off
 from popup_automation import (
     detect_save_popup,
     detect_save_changes_to_popup,
     handle_save_changes_to,
     handle_save_live_set_as,
     handle_qubiq_popup,
+    dismiss_plugin_messagebox_popups,
 )
 import ableton_build
 import ableton_state
@@ -47,7 +48,7 @@ def launch_ableton_from_menu(project_path):
         timeout = 30
         while time.time() - start_time < timeout:
             if not win_exists("Open Document:"):
-                logger.info("Open Document dialog closed successfully")
+                logger.debug("Open Document dialog closed successfully")
                 return True
             time.sleep(0.5)
 
@@ -66,7 +67,7 @@ def get_open_document(timeout=30):
             for w in Desktop(backend="win32").windows():
                 title = w.window_text()
                 if title == "Open Document:":
-                    logger.info(f"Found 'Open Document:' dialog")
+                    logger.debug(f"Found 'Open Document:' dialog")
                     return w
         except Exception as e:
             logger.debug(f"Error in get_open_document: {e}")
@@ -85,6 +86,7 @@ def handle_open_document_dialog(project_path):
         logger.debug(f"Opening: {project_filename} from {project_dir}")
         
         # Focus the address/path bar and enter directory
+        ensure_caps_lock_off()
         pyautogui.hotkey('alt', 'd')
         time.sleep(0.3)
 
@@ -111,7 +113,7 @@ def handle_open_document_dialog(project_path):
         pyautogui.hotkey('alt', 'o')
         time.sleep(0.5)
         
-        logger.info(f"Opened project via dialog: {project_filename}")
+        logger.debug(f"Opened project via dialog: {project_filename}")
         return True
         
     except Exception as e:
@@ -149,7 +151,7 @@ def verify_project_loaded(project_path, timeout=30):
     if project_name.endswith('.als'):
         project_name = project_name[:-4]
     
-    logger.info(f"Verifying project: '{project_name}'")
+    logger.debug(f"Verifying project: '{project_name}'")
     start_time = time.time()
     
     while time.time() - start_time < timeout:
@@ -165,7 +167,7 @@ def verify_project_loaded(project_path, timeout=30):
                     
                     # Check if project name is in the window title
                     if project_name in window_title:
-                        logger.info(f"Verified: '{project_name}' is loaded in window: {window_title}")
+                        logger.debug(f"Verified: '{project_name}' is loaded in window: {window_title}")
                         return True
                 except Exception:
                     continue
@@ -214,7 +216,7 @@ def wait_for_ableton_to_respond(window_title, timeout=60):
         
         # If we were previously not responding and now it's back
         if not_responding_logged:
-            logger.info("Ableton is responding again")
+            logger.debug("Ableton is responding again")
         
         return True
     
@@ -226,7 +228,7 @@ def wait_for_ableton_to_respond(window_title, timeout=60):
 def maximize_ableton_window():
     window = _find_window_element(_title_re(), backend="win32", timeout=2)
     if window is None:
-        logger.info("Could not maximize window: no matching window found")
+        logger.debug("Could not maximize window: no matching window found")
         return
     try:
         window.set_focus()
@@ -236,7 +238,7 @@ def maximize_ableton_window():
         is_max = bool(window.is_maximized())
         logger.debug(f"is_maximized (Win32): {is_max}")
     except Exception as e:
-        logger.info(f"Could not maximize window: {e}")
+        logger.debug(f"Could not maximize window: {e}")
 
 def close_ableton_cleanly(ableton_version=None, save_changes_timeout=15, close_confirm_timeout=20):
     """
@@ -265,7 +267,7 @@ def close_ableton_cleanly(ableton_version=None, save_changes_timeout=15, close_c
     window_title = ableton_build.get_build().get("window_title", "Ableton Live")
 
     if not win_exists(window_title):
-        logger.info("Ableton is not open - nothing to close")
+        logger.debug("Ableton is not open - nothing to close")
         return True
 
     window = win_activate_ableton()
@@ -276,19 +278,20 @@ def close_ableton_cleanly(ableton_version=None, save_changes_timeout=15, close_c
     if ableton_state.has_unsaveable_changes():
         # Effects were switched for a wet+dry export: closing must discard
         # that, so no Ctrl+S - the "save changes?" prompt below is answered No.
-        logger.info("Set has wet+dry effect changes - closing WITHOUT saving")
+        logger.debug("Set has wet+dry effect changes - closing WITHOUT saving")
     else:
         pyautogui.hotkey('ctrl', 's')
-        logger.info("Sent Ctrl+S before closing Ableton")
+        logger.debug("Sent Ctrl+S before closing Ableton")
         time.sleep(0.5)
 
-    # Saving can re-trigger plugin validation and surface a "Qubiq Engine"
-    # popup (one per problematic plugin instance) - clear those out before
-    # they block the rest of the close sequence.
+    # Saving can re-trigger plugin validation and surface messageboxes
+    # ("Qubiq Engine", "Kontakt 7", ...) - clear those out before they
+    # block the rest of the close sequence. Handle-based, no OCR.
+    dismiss_plugin_messagebox_popups()
     handle_qubiq_popup()
 
     if not ableton_state.has_unsaveable_changes() and detect_save_popup():
-        logger.info("Detected 'different Live version' save warning while closing - handling it")
+        logger.debug("Detected 'different Live version' save warning while closing - handling it")
         pyautogui.press('enter')
         time.sleep(0.3)
         popup_deadline = time.time() + 15
@@ -300,9 +303,10 @@ def close_ableton_cleanly(ableton_version=None, save_changes_timeout=15, close_c
     time.sleep(0.5)
 
     win_close(window_title)
-    logger.info(f"Sent close request to '{window_title}'")
+    logger.debug(f"Sent close request to '{window_title}'")
 
     # Closing itself can also re-trigger plugin validation.
+    dismiss_plugin_messagebox_popups()
     handle_qubiq_popup()
 
     # A stray "Save changes to <project> before closing?" prompt can still
@@ -313,7 +317,7 @@ def close_ableton_cleanly(ableton_version=None, save_changes_timeout=15, close_c
         if not win_exists(window_title):
             break
         if detect_save_changes_to_popup(threshold=0.75):
-            logger.info("Detected 'save changes before closing' popup - dismissing")
+            logger.debug("Detected 'save changes before closing' popup - dismissing")
             handle_save_changes_to()
             break
         time.sleep(0.3)
@@ -321,7 +325,7 @@ def close_ableton_cleanly(ableton_version=None, save_changes_timeout=15, close_c
     deadline = time.time() + close_confirm_timeout
     while time.time() < deadline:
         if not win_exists(window_title):
-            logger.info("Ableton window closed successfully")
+            logger.debug("Ableton window closed successfully")
             ableton_state.clear_unsaveable_changes()
             return True
         time.sleep(0.3)
@@ -335,7 +339,7 @@ def get_ableton_window_center():
     Returns tuple (center_x, center_y) or None if window not found."""
     window = _find_window_element(_title_re(), backend="uia", timeout=2)
     if window is None:
-        logger.info("Could not get Ableton window center: no matching window found")
+        logger.debug("Could not get Ableton window center: no matching window found")
         return None
     try:
         rect = window.rectangle()
@@ -343,5 +347,5 @@ def get_ableton_window_center():
         center_y = (rect.top + rect.bottom) // 2
         return (center_x, center_y)
     except Exception as e:
-        logger.info(f"Could not get Ableton window center: {e}")
+        logger.debug(f"Could not get Ableton window center: {e}")
         return None

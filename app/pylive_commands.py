@@ -17,55 +17,49 @@ def unmute_all_tracks(set):
     
 
     try:
-        # Try direct OSC query first, fallback to locally-cached track list
+        # Iterate the scanned list directly: set.num_tracks counts song tracks
+        # while set.tracks can be shorter (group tracks are skipped), so
+        # range(num_tracks) overruns into "list index out of range".
         try:
-            num_tracks = set.num_tracks
-            
-        except:
-            # Fallback: use local track list from scan (more reliable on first project)
-            num_tracks = len(set.tracks)
-            
-        
-        for i in range(num_tracks):
+            tracks = list(set.tracks)
+        except Exception:
+            tracks = []
+        for track in tracks:
             try:
-                set.tracks[i].mute = False
-                set.tracks[i].solo = False
-                set.tracks[i].arm = False
+                track.mute = False
+                track.solo = False
+                track.arm = False
             except Exception as e:
-                logger.debug(f"Note: Could not unmute return track {i}: {e}")
+                logger.warning(f"Note: Could not unmute track {getattr(track, 'name', '?')}: {e}")
                 continue
         
-        logger.info("Unmuted all tracks successfully")
+        logger.debug("Unmuted all tracks successfully")
         return True
     except Exception as e:
-        logger.info(f"Error unmuting tracks: {e}")
+        logger.debug(f"Error unmuting tracks: {e}")
         return False
 
 def unsolo_all_tracks(set):    
     """Unsolo all tracks in the current Ableton Live set"""
     
     try:
-        # Try direct OSC query first, fallback to locally-cached track list
+        # Iterate the scanned list directly (see unmute_all_tracks).
         try:
-            num_tracks = set.num_tracks
-            
-        except:
-            # Fallback: use local track list from scan (more reliable on first project)
-            num_tracks = len(set.tracks)
-            
-        
-        for i in range(num_tracks): 
+            tracks = list(set.tracks)
+        except Exception:
+            tracks = []
+        for track in tracks: 
             try:
-                set.tracks[i].solo = False
-                set.tracks[i].arm = False
+                track.solo = False
+                track.arm = False
             except Exception as e:
-                logger.debug(f"Note: Could not unsolo return track {i}: {e}")
+                logger.warning(f"Note: Could not unsolo track {getattr(track, 'name', '?')}: {e}")
                 continue
         
-        logger.info("Unsoloed all tracks successfully")
+        logger.debug("Unsoloed all tracks successfully")
         return True
     except Exception as e:
-        logger.info(f"Error unsoloing tracks: {e}")
+        logger.debug(f"Error unsoloing tracks: {e}")
         return False
 
 def disable_external_devices(set):
@@ -76,7 +70,7 @@ def disable_external_devices(set):
     try:
         tracks_list = list(set.tracks)
     except Exception as e:
-        logger.info(f"Warning: Could not get tracks list: {e}")
+        logger.debug(f"Warning: Could not get tracks list: {e}")
         return 0
     
     try:
@@ -92,21 +86,21 @@ def disable_external_devices(set):
                 try:
                     if device.name in ["Ext. Instrument", "Ext. Audio Effect"]:
                         device.set_parameter('Device On', 0)
-                        logger.info(f"Disabled '{device.name}' on track '{track_name}'")
+                        logger.debug(f"Disabled '{device.name}' on track '{track_name}'")
                         disabled_count += 1
                 except Exception as e:
                     logger.debug(f"Note: Error disabling device: {e}")
                     continue
         
         if disabled_count > 0:
-            logger.info(f"Disabled {disabled_count} external device(s)")
+            logger.debug(f"Disabled {disabled_count} external device(s)")
         else:
-            logger.info("No external devices found to disable")
+            logger.debug("No external devices found to disable")
         
         return disabled_count
         
     except Exception as e:
-        logger.info(f"Error in disable_external_devices: {e}")
+        logger.debug(f"Error in disable_external_devices: {e}")
         return 0
 
 
@@ -225,7 +219,7 @@ def disable_audio_effects(set, verify=True):
     try:
         num_tracks = set.num_tracks
     except Exception as e:
-        logger.info(f"Could not read track count, audio effects left as they are: {e}")
+        logger.debug(f"Could not read track count, audio effects left as they are: {e}")
         return None
 
     for track_index in range(num_tracks):
@@ -248,7 +242,7 @@ def disable_audio_effects(set, verify=True):
 
     if verify and switched and not _wait_for_device_state(live, TRACK_DEVICE_PREFIX, switched, False):
         return None
-    logger.info(f"Disabled {len(switched)} audio effect(s)")
+    logger.debug(f"Disabled {len(switched)} audio effect(s)")
     return len(switched)
 
 
@@ -266,7 +260,7 @@ def get_main_devices(set):
         names = live.query("/live/master_track/get/devices/name")
         class_names = live.query("/live/master_track/get/devices/class_name") if names else []
     except Exception as e:
-        logger.info("Could not list main track devices; is the patched AbletonOSC "
+        logger.debug("Could not list main track devices; is the patched AbletonOSC "
                     f"(with /live/master_track handlers) installed and Live restarted? {e}")
         return None
 
@@ -278,7 +272,7 @@ def get_main_devices(set):
             if _has_device_on(live, MAIN_DEVICE_PREFIX, ids, name, "main track"):
                 on = _get_device_on(live, MAIN_DEVICE_PREFIX, ids)
         except Exception as e:
-            logger.info(f"Could not read the on/off state of '{name}' on the main track "
+            logger.debug(f"Could not read the on/off state of '{name}' on the main track "
                         f"(is the patched AbletonOSC up to date?): {e}")
             return None
         devices.append({"index": device_index, "name": name, "class_name": class_name, "on": on})
@@ -296,7 +290,7 @@ def enable_main_devices_named(set, text, verify=True):
     switched = [d for d in devices if d["on"] is False and needle in str(d["name"]).lower()]
     for d in switched:
         _set_device_on(live, MAIN_DEVICE_PREFIX, (d["index"],), True)
-        logger.info(f"Enabled '{d['name']}' on the main track")
+        logger.debug(f"Enabled '{d['name']}' on the main track")
     if verify and switched and not _wait_for_device_state(
             live, MAIN_DEVICE_PREFIX, [(d["index"],) for d in switched], True):
         return None
@@ -328,7 +322,7 @@ def disable_main_effects(set, verify=True):
         names = live.query("/live/master_track/get/devices/name")
         class_names = live.query("/live/master_track/get/devices/class_name") if names else []
     except Exception as e:
-        logger.info("Could not list main track devices; is the patched AbletonOSC "
+        logger.debug("Could not list main track devices; is the patched AbletonOSC "
                     f"(with /live/master_track handlers) installed and Live restarted? {e}")
         return None
 
@@ -341,12 +335,12 @@ def disable_main_effects(set, verify=True):
 
     if verify and switched and not _wait_for_device_state(live, MAIN_DEVICE_PREFIX, switched, False):
         return None
-    logger.info(f"Disabled {len(switched)} main track effect(s)")
+    logger.debug(f"Disabled {len(switched)} main track effect(s)")
     return len(switched)
 
 
 def get_tempo(set):
-    """Get the current tempo from Ableton Live set"""
+    """Get the `current tempo` from Ableton Live set"""
     
     try:
         

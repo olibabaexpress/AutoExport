@@ -3,8 +3,7 @@
 import json
 import logging
 import pathlib
-
-import tqdm
+from threading import Event
 
 from abletoolz.misc import DEFAULT_DB_PATH
 
@@ -16,7 +15,9 @@ SampleRecord = dict[str, str | int | float]
 DatabaseT = dict[str, SampleRecord]
 
 
-def get_all_audio_files(path: pathlib.Path) -> list[pathlib.Path]:
+def get_all_audio_files(
+    path: pathlib.Path, pause_event: Event | None = None
+) -> list[pathlib.Path]:
     """Find all supported audio files in directory."""
     file_suffixes = [
         "*.aiff",
@@ -37,7 +38,10 @@ def get_all_audio_files(path: pathlib.Path) -> list[pathlib.Path]:
     ]
     all_files: list[pathlib.Path] = []
     for file_type in file_suffixes:
-        all_files.extend(list(path.rglob(file_type)))
+        for audio_file in path.rglob(file_type):
+            if pause_event is not None:
+                pause_event.wait()
+            all_files.append(audio_file)
     return all_files
 
 
@@ -45,6 +49,7 @@ def create_or_update_db(
     paths: list[str],
     db_path: pathlib.Path | None = None,
     progress_callback=None,
+    pause_event: Event | None = None,
     ) -> pathlib.Path:
     """Search all samples and add to database, create new one if it doesn't exist.
 
@@ -62,7 +67,13 @@ def create_or_update_db(
         db_path = DEFAULT_DB_PATH
     # Create the parent dir now, before the (potentially long) scan — a first run
     # on a fresh machine must not crash at write time after scanning everything.
-    db_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        raise OSError(
+            f"Cannot create database directory {db_path.parent}. "
+            f"Check permissions: {e}"
+        ) from e
     logger.info(
         "Using db path %s. Creating database from scratch can take a while, please be patient. Updating "
         "an existing one is much faster!",
@@ -72,15 +83,22 @@ def create_or_update_db(
     if not db_path.exists():
         db = {}
     else:
-        with db_path.open("r") as f:
-            db = json.load(f)
+        try:
+            with db_path.open("r") as f:
+                db = json.load(f)
+        except (OSError, json.JSONDecodeError) as e:
+            raise OSError(
+                f"Could not read existing database at {db_path}: {e}"
+            ) from e
     all_files = []
 
     if progress_callback:
         progress_callback("discovering", 0, len(paths))
 
     for path_index, path in enumerate(paths, start=1):
-        found = get_all_audio_files(pathlib.Path(path))
+        if pause_event is not None:
+            pause_event.wait()
+        found = get_all_audio_files(pathlib.Path(path), pause_event)
         all_files.extend(found)
 
         if progress_callback:
@@ -95,10 +113,13 @@ def create_or_update_db(
     db_items = list(db.keys())
     db_total = len(db_items)
 
-    for index, path in enumerate(
-        tqdm.tqdm(db_items, desc="Validating current db..."),
-        start=1,
-    ):
+    # Plain loop, no tqdm: the frozen GUI is windowed (noconsole), where
+    # sys.stdout/sys.stderr are None - tqdm's console write then crashes with
+    # "'NoneType' object has no attribute 'write'". Progress goes through
+    # progress_callback to the GUI label instead.
+    for index, path in enumerate(db_items, start=1):
+        if pause_event is not None:
+            pause_event.wait()
         if not pathlib.Path(path).exists():
             to_remove.append(path)
 
@@ -113,10 +134,9 @@ def create_or_update_db(
 
     file_total = len(all_files)
 
-    for index, sample in enumerate(
-        tqdm.tqdm(all_files, desc="Progress"),
-        start=1,
-    ):
+    for index, sample in enumerate(all_files, start=1):
+        if pause_event is not None:
+            pause_event.wait()
         if str(sample.resolve()) not in db:
             db[str(sample.resolve())] = {
                 "name": sample.name,
@@ -131,8 +151,15 @@ def create_or_update_db(
                 file_total,
             )
     # Write db!
-    with db_path.open("w") as f:
-        json.dump(db, f, indent=2, sort_keys=True)
+    if pause_event is not None:
+        pause_event.wait()
+    try:
+        with db_path.open("w") as f:
+            json.dump(db, f, indent=2, sort_keys=True)
+    except OSError as e:
+        raise OSError(
+            f"Could not write database to {db_path}. Check permissions: {e}"
+        ) from e
     logger.info("Updated database at %s", db_path.resolve())
     return db_path
 
