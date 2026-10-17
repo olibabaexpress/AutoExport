@@ -15,6 +15,7 @@ def build_project_media_status(results):
     categories = {
         "non_portable": [],
         "unresolved_missing_media": [],
+        "candidate_review": [],
         "fully_portable": [],
     }
     confirmed_missing = {}
@@ -35,6 +36,11 @@ def build_project_media_status(results):
             "external_sample_names": sorted(
                 set(result.get("external_sample_names", ()))
             ),
+            "external_sample_details": [
+                detail
+                for detail in result.get("external_sample_details", ())
+                if isinstance(detail, dict)
+            ],
             "unresolved_sample_names": sorted(
                 set(result.get("still_missing_names", ()))
             ),
@@ -51,6 +57,14 @@ def build_project_media_status(results):
                 project["categories"].append("unresolved_missing_media")
                 categories["unresolved_missing_media"].append(path)
                 project["media_status"] = "Missing"
+                if any(
+                    isinstance(detail, dict)
+                    and detail.get("reason") == "ambiguous_candidates"
+                    for detail in project["missing_sample_details"]
+                ):
+                    project["categories"].append("candidate_review")
+                    categories["candidate_review"].append(path)
+                    project["media_status"] = "Candidates"
             if (
                 project["missing_after"] == 0
                 and project["external_sample_refs"] == 0
@@ -90,40 +104,92 @@ def missing_audio_list_path():
     return Path(data_file(MISSING_AUDIO_LIST_NAME))
 
 
+def _split_unresolved(project):
+    """Return (missing_entries, candidate_entries) as unique-friendly tuples.
+
+    missing_entries: (name, stored_path or None)
+    candidate_entries: (name, stored_path or None, [candidate paths])
+    """
+    missing = []
+    candidates = []
+    seen_names = set()
+    for detail in project.get("missing_sample_details", ()):
+        if not isinstance(detail, dict):
+            continue
+        name = str(detail.get("name") or "")
+        seen_names.add(name)
+        stored = detail.get("stored_path")
+        if detail.get("reason") == "ambiguous_candidates":
+            candidates.append((name, stored, list(detail.get("candidates", ()))))
+        else:
+            missing.append((name, stored))
+    for name in project.get("unresolved_sample_names", ()):
+        if name not in seen_names:
+            missing.append((str(name), None))
+    return missing, candidates
+
+
 def format_project_missing_lines(project):
     """Describe one project's missing samples with their stored paths."""
-    details = [
-        detail
-        for detail in project.get("missing_sample_details", ())
-        if isinstance(detail, dict)
-    ]
     lines = []
-    seen = set()
-    for detail in details:
-        name = str(detail.get("name") or "")
-        stored = detail.get("stored_path") or "(no stored path)"
-        seen.add(name)
+    seen_entries = set()
+    for name, stored in _split_unresolved(project)[0]:
+        stored = stored or "(not recorded)"
+        if (name, stored) in seen_entries:
+            continue
+        seen_entries.add((name, stored))
         lines.append(f"  {name}\n      Path: {stored}")
-    for name in project.get("unresolved_sample_names", ()):
-        if name not in seen:
-            lines.append(f"  {name}\n      Path: (not recorded)")
+    return lines
+
+
+def format_project_candidate_lines(project):
+    """Describe samples with several possible matches needing a human pick."""
+    lines = []
+    seen_entries = set()
+    for name, stored, paths in _split_unresolved(project)[1]:
+        stored = stored or "(not recorded)"
+        if (name, stored) in seen_entries:
+            continue
+        seen_entries.add((name, stored))
+        body = "\n".join(f"        {p}" for p in paths)
+        lines.append(
+            f"  {name}\n      Expected: {stored}\n      Candidates:\n{body}"
+        )
     return lines
 
 
 def format_missing_audio_list(projects):
     """Build the plain-text missing audio list for all projects."""
-    blocks = []
+    samples = {}
     for project in projects:
-        lines = format_project_missing_lines(project)
-        if project.get("media_status") != "Missing" or not lines:
+        if project.get("media_status") not in ("Missing", "Candidates"):
             continue
+        project_name = Path(str(project.get("path", ""))).stem or str(
+            project.get("path", "")
+        )
+        entries = _split_unresolved(project)[0]
+        for name, stored in entries:
+            record = samples.setdefault(
+                name.lower(), {"name": name, "paths": [], "projects": []}
+            )
+            if stored and str(stored) not in record["paths"]:
+                record["paths"].append(str(stored))
+            if project_name not in record["projects"]:
+                record["projects"].append(project_name)
+    blocks = []
+    for key in sorted(samples):
+        record = samples[key]
+        paths = record["paths"] or ["(not recorded)"]
         blocks.append(
-            f"{project.get('path', '')}\n" + "\n".join(lines)
+            f"{record['name']}\n    Expected Path(s):\n"
+            + "\n".join(f"         {p}" for p in paths)
+            + "\n    Referenced In:\n"
+            + "\n".join(f"            {p}" for p in record["projects"])
         )
     header = (
         f"Missing audio list - updated "
         f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
-        f"Projects with missing audio: {len(blocks)}\n"
+        f"Unique missing samples: {len(blocks)}\n"
     )
     return header + "\n" + "\n\n".join(blocks) + ("\n" if blocks else "")
 
@@ -173,6 +239,7 @@ def save_project_media_status(results, output_path=None, merge=False):
         categories = {
             "non_portable": [],
             "unresolved_missing_media": [],
+            "candidate_review": [],
             "fully_portable": [],
         }
         confirmed_missing = {}

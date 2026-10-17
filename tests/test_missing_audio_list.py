@@ -29,7 +29,7 @@ class MissingAudioListTest(unittest.TestCase):
             status = Path(tmp) / "project_media_status.json"
             save_project_media_status(results, output_path=status)
             text = (Path(tmp) / "missing_audio_list.txt").read_text("utf-8")
-        self.assertIn(r"C:\P\a.als", text)
+        self.assertIn("Referenced In:\n            a", text)
         self.assertIn("kick.wav", text)
         self.assertIn(r"D:\old\kick.wav", text)
         self.assertNotIn("b.als", text)

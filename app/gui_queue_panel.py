@@ -294,7 +294,8 @@ class QueuePanelMixin:
         missing_paths = {
             task["project_path"]
             for task in self.task_manager.get_tasks()
-            if self._project_media_status_label(task["project_path"]) == "Missing"
+            if self._project_media_status_label(task["project_path"])
+            in ("Missing", "Candidates")
         }
         self.remove_from_queue(missing_paths)
         return "break"

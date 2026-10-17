@@ -13,8 +13,10 @@ can't resolve (e.g. samples that were never indexed anywhere on disk) is
 left missing and reported as such - it needs manual relinking.
 """
 
+import filecmp
 import logging
 import os
+import shutil
 from collections import Counter
 from pathlib import Path
 
@@ -150,13 +152,26 @@ def _path_is_within(path, root):
         return False
 
 
-def _collect_external_sample_names(ableton_set, project_path):
-    """Collect sample names whose usable or stored location is outside the project."""
+LIBRARY_RELATIVE_TYPE = 2
+
+
+def _is_library_ref(ref):
+    """Samples Live resolves from the Ableton library need no collecting."""
+    try:
+        return ref.get_relative_type() == LIBRARY_RELATIVE_TYPE
+    except Exception:
+        return False
+
+
+def _collect_external_sample_details(ableton_set, project_path):
+    """Return {name, path} entries for samples outside the project."""
     project_root = ableton_set.find_project_root_folder() or Path(project_path).parent
-    external_names = []
+    details = []
     for ref in ableton_set.samples.iterate():
+        if _is_library_ref(ref):
+            continue
         if _is_live_pack_ref(ref):
-            external_names.append(ref.name)
+            details.append({"name": ref.name, "path": str(ref.absolute or "")})
             continue
 
         if getattr(ref, "relative_exists", False) and ref.relative is not None:
@@ -167,8 +182,16 @@ def _collect_external_sample_names(ableton_set, project_path):
                 sample_path = project_root / ref.relative
 
         if sample_path is not None and not _path_is_within(sample_path, project_root):
-            external_names.append(ref.name)
-    return external_names
+            details.append({"name": ref.name, "path": str(sample_path)})
+    return details
+
+
+def _collect_external_sample_names(ableton_set, project_path):
+    """Collect sample names whose usable or stored location is outside the project."""
+    return [
+        detail["name"]
+        for detail in _collect_external_sample_details(ableton_set, project_path)
+    ]
 
 
 def _build_name_index(db):
@@ -200,18 +223,175 @@ def _get_size_verified_candidates(ref, name_index):
     return candidates
 
 
-def _unresolved_sample_details(refs, name_index, index_available=True):
+def _same_file_content(first, second):
+    """Whether two files are byte-identical (size check, then full compare)."""
+    try:
+        if os.path.getsize(first) != os.path.getsize(second):
+            return False
+        return filecmp.cmp(first, second, shallow=False)
+    except OSError:
+        return False
+
+
+def _group_identical_files(paths):
+    """Partition paths into groups of byte-identical files."""
+    groups = []
+    for path in paths:
+        for group in groups:
+            if _same_file_content(group[0], path):
+                group.append(path)
+                break
+        else:
+            groups.append([path])
+    return groups
+
+
+def _path_parts(path):
+    return [part.casefold() for part in Path(path).parts]
+
+
+def _expected_path_similarity(expected, candidate):
+    """Count matching folder names, walking up from the file's own folder."""
+    if not expected:
+        return 0
+    first = _path_parts(Path(expected).parent)
+    second = _path_parts(Path(candidate).parent)
+    score = 0
+    for left, right in zip(reversed(first), reversed(second)):
+        if left != right:
+            break
+        score += 1
+    return score
+
+
+def _closeness_to_project(candidate, project_dir):
+    """Sort key: more shared leading folders with the project is closer."""
+    shared = 0
+    if project_dir:
+        for left, right in zip(_path_parts(candidate), _path_parts(project_dir)):
+            if left != right:
+                break
+            shared += 1
+    return (-shared, len(str(candidate)), str(candidate).casefold())
+
+
+def _choose_name_candidate(ref, name_index, project_dir):
+    """
+    Pick an indexed file for a reference whose original size is unknown.
+
+    Returns (chosen_path or None, all existing candidate paths). A single
+    candidate wins outright. Several byte-identical copies resolve to the one
+    closest to the project. Differing files are separated by how well their
+    folders match the expected path; if that can't pick a unique winner the
+    choice is left to the user (chosen is None).
+    """
+    existing = []
+    for smp_path, _info in name_index.get(ref.name, []):
+        try:
+            if os.path.isfile(smp_path):
+                existing.append(smp_path)
+        except OSError:
+            continue
+    if not existing:
+        return None, []
+    if len(existing) == 1:
+        return existing[0], existing
+
+    groups = _group_identical_files(existing)
+    if len(groups) > 1:
+        scored = [
+            (max(_expected_path_similarity(ref.absolute, p) for p in group), group)
+            for group in groups
+        ]
+        best = max(score for score, _group in scored)
+        top = [group for score, group in scored if score == best]
+        if best <= 0 or len(top) > 1:
+            return None, existing
+        group = top[0]
+    else:
+        group = groups[0]
+    return min(group, key=lambda p: _closeness_to_project(p, project_dir)), existing
+
+
+def _size_unknown(ref):
+    return ref.size is None or ref.size <= 0
+
+
+def _plan_name_fallbacks(refs, name_index, project_dir):
+    """Map id(ref) -> (chosen, candidates) for refs lacking an original size."""
+    plan = {}
+    cache = {}
+    for ref in refs:
+        if not _size_unknown(ref):
+            continue
+        key = (ref.name, str(ref.absolute))
+        if key not in cache:
+            cache[key] = _choose_name_candidate(ref, name_index, project_dir)
+        plan[id(ref)] = cache[key]
+    return plan
+
+
+def _apply_name_fallbacks(refs, plan, project_root, mode):
+    """Relink (or collect) refs resolved by the name fallback. Returns count."""
+    changed = 0
+    for ref in refs:
+        chosen = plan.get(id(ref), (None, []))[0]
+        if not chosen:
+            continue
+        source = Path(chosen)
+        if mode == "collect" and project_root:
+            try:
+                relative_type = ref.get_relative_type()
+            except Exception:
+                relative_type = None
+            rel_path = (
+                str(ref.get_relative_value())
+                if relative_type == 3
+                else "Samples/Imported"
+            )
+            target = project_root / rel_path / ref.name
+            if not target.exists() or _same_file_content(target, source):
+                target.parent.mkdir(parents=True, exist_ok=True)
+                if not target.exists():
+                    shutil.copy(source, target)
+                ref.set_relative(f"{rel_path}/{target.name}")
+                ref.set_relative_type(3)
+                changed += 1
+                continue
+        ref.set_absolute(source)
+        ref.set_relative_type(1)
+        changed += 1
+    return changed
+
+
+def _unresolved_sample_details(
+    refs, name_index, index_available=True, project_dir=None
+):
     """Describe unresolved refs and whether the filename exists in the index."""
     details = []
+    name_choices = {}
     for ref in refs:
         indexed = name_index.get(ref.name, []) if index_available else []
         valid = _get_size_verified_candidates(ref, name_index) if index_available else []
+        candidate_paths = []
         if not index_available:
             reason = "index_unavailable"
         elif not indexed:
             reason = "not_in_index"
         elif ref.size is None or ref.size <= 0:
-            reason = "original_size_unavailable"
+            key = (ref.name, str(ref.absolute))
+            if key not in name_choices:
+                name_choices[key] = _choose_name_candidate(
+                    ref, name_index, project_dir or ""
+                )
+            chosen, existing = name_choices[key]
+            if chosen is None and len(existing) > 1:
+                reason = "ambiguous_candidates"
+                candidate_paths = existing
+            elif chosen is not None:
+                reason = "indexed_match_unresolved"
+            else:
+                reason = "original_size_unavailable"
         elif valid:
             reason = "indexed_match_unresolved"
         elif any(
@@ -222,7 +402,7 @@ def _unresolved_sample_details(refs, name_index, index_available=True):
         else:
             reason = "size_mismatch"
 
-        details.append({
+        detail = {
             "name": ref.name,
             "expected_size": ref.size,
             "stored_path": str(ref.absolute) if ref.absolute else None,
@@ -232,7 +412,10 @@ def _unresolved_sample_details(refs, name_index, index_available=True):
                 for path, info in indexed[:5]
             ],
             "indexed_match_count": len(indexed),
-        })
+        }
+        if candidate_paths:
+            detail["candidates"] = [str(p) for p in candidate_paths[:25]]
+        details.append(detail)
     return details
 
 
@@ -260,7 +443,9 @@ def _size_verified_database(db, refs, name_index):
     return strict_db
 
 
-def _simulate_fix(ableton_set, missing_refs, db, name_index=None, mode="collect"):
+def _simulate_fix(
+    ableton_set, missing_refs, db, name_index=None, mode="collect", plan=None
+):
     """
     Read-only replay of the resolver's safe matching rules without copying
     files or mutating the parsed document. A candidate must have a matching
@@ -278,6 +463,8 @@ def _simulate_fix(ableton_set, missing_refs, db, name_index=None, mode="collect"
         name_index = _build_name_index(db)
 
     project_root = ableton_set.find_project_root_folder()
+    if plan is None:
+        plan = _plan_name_fallbacks(missing_refs, name_index, project_root or "")
 
     collected_names = []
     linked_names = []
@@ -288,7 +475,16 @@ def _simulate_fix(ableton_set, missing_refs, db, name_index=None, mode="collect"
     for ref in missing_refs:
         candidates = _get_size_verified_candidates(ref, name_index)
         match_info = candidates[0][1] if candidates else None
-
+        if match_info is None and id(ref) in plan:
+            chosen = plan[id(ref)][0]
+            if chosen:
+                try:
+                    match_info = {
+                        "name": ref.name,
+                        "size": os.path.getsize(chosen),
+                    }
+                except OSError:
+                    match_info = None
         if match_info is None:
             still_missing_names.append(ref.name)
             still_missing_refs.append(ref)
@@ -324,7 +520,84 @@ def _simulate_fix(ableton_set, missing_refs, db, name_index=None, mode="collect"
     return collected_names, linked_names, still_missing_names, still_missing_refs, linked_refs
 
 
+def _collect_external_refs(ableton_set, project_root):
+    """Copy existing external samples into the project and point refs at them."""
+    changed = 0
+    for ref in ableton_set.samples.iterate():
+        if _is_live_pack_ref(ref) or _is_library_ref(ref):
+            continue
+        if getattr(ref, "relative_exists", False) and ref.relative is not None:
+            source = project_root / ref.relative
+        else:
+            source = ref.absolute
+            if source is None and ref.relative is not None:
+                source = project_root / ref.relative
+        if source is None:
+            continue
+        source = Path(source)
+        if not source.is_file() or _path_is_within(source, project_root):
+            continue
+        target = project_root / "Samples" / "Imported" / source.name
+        try:
+            if target.exists() and not _same_file_content(target, source):
+                logger.warning(
+                    f"Not collecting {source}: a different {source.name} "
+                    "already exists in Samples/Imported."
+                )
+                continue
+            if not target.exists():
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy(source, target)
+            ref.set_relative(f"Samples/Imported/{target.name}")
+            ref.set_relative_type(3)
+            changed += 1
+        except OSError as error:
+            logger.warning(f"Could not collect {source}: {error}")
+    return changed
+
+
 def resolve_missing_media(
+    project_path, db, dry_run=False, name_index=None, mode="collect"
+):
+    """Resolve missing samples; in collect mode also gather linked externals."""
+    result = _resolve_missing_media_core(
+        project_path, db, dry_run=dry_run, name_index=name_index, mode=mode
+    )
+    result.setdefault('collected_external', 0)
+    if mode != "collect" or dry_run or not result.get('success'):
+        return result
+    try:
+        als_path = Path(project_path)
+        fresh = AbletonSet(als_path)
+        if not fresh.parse():
+            return result
+        project_root = fresh.find_project_root_folder() or als_path.parent
+        _exclude_pack_refs_from_fix(fresh)
+        changed = _collect_external_refs(fresh, Path(project_root))
+        if not changed:
+            return result
+        fresh.save_set()
+        result['collected_external'] = changed
+        result['saved'] = True
+        result['would_save'] = True
+        verify = AbletonSet(als_path)
+        if verify.parse():
+            verify.find_project_root_folder()
+            result['external_sample_names'] = sorted(
+                _collect_external_sample_names(verify, als_path)
+            )
+            result['external_sample_refs'] = len(result['external_sample_names'])
+            result['external_sample_details'] = _collect_external_sample_details(verify, als_path)
+        logger.info(
+            f"[abletoolz] {als_path.name}: collected {changed} external sample "
+            "reference(s) into Samples/Imported."
+        )
+    except Exception as error:
+        logger.error(f"Error collecting external samples for {project_path}: {error}")
+    return result
+
+
+def _resolve_missing_media_core(
     project_path, db, dry_run=False, name_index=None, mode="collect"
 ):
     """
@@ -408,6 +681,7 @@ def resolve_missing_media(
             _collect_external_sample_names(ableton_set, als_path)
         )
         result['external_sample_refs'] = len(result['external_sample_names'])
+        result['external_sample_details'] = _collect_external_sample_details(ableton_set, als_path)
 
         missing_before_refs, pack_refs = _filter_pack_refs(ableton_set.samples.check())
         result['pack_skipped'] = len(pack_refs)
@@ -443,6 +717,10 @@ def resolve_missing_media(
             "attempting fix via sample database..."
         )
 
+        fallback_plan = _plan_name_fallbacks(
+            missing_before_refs, name_index, als_path.parent
+        )
+
         if dry_run:
             # abletoolz's fix(collect_and_save=True) copies matched audio files
             # even if save_set() is never called, so previews use the same
@@ -455,7 +733,7 @@ def resolve_missing_media(
                 _linked_refs,
             ) = _simulate_fix(
                 ableton_set, missing_before_refs, db, name_index=name_index,
-                mode=mode,
+                mode=mode, plan=fallback_plan,
             )
             fixed_names = collected_names
             if mode == "relink":
@@ -463,7 +741,7 @@ def resolve_missing_media(
             result['would_save'] = bool(collected_names or linked_names)
             result['missing_roots'] = _collect_missing_roots(still_missing_refs)
             result['missing_sample_details'] = _unresolved_sample_details(
-                still_missing_refs, name_index
+                still_missing_refs, name_index, project_dir=als_path.parent
             )
         else:
             # Predict the collect/link split up front using the same
@@ -478,7 +756,7 @@ def resolve_missing_media(
                 linked_refs,
             ) = _simulate_fix(
                 ableton_set, missing_before_refs, db, name_index=name_index,
-                mode=mode,
+                mode=mode, plan=fallback_plan,
             )
 
             strict_db = _size_verified_database(
@@ -524,6 +802,11 @@ def resolve_missing_media(
 
             result['would_save'] = bool(did_fix_collect or did_fix_link)
 
+            fallback_applied = _apply_name_fallbacks(
+                missing_before_refs, fallback_plan,
+                ableton_set.find_project_root_folder(), mode,
+            )
+            result['would_save'] = bool(result['would_save'] or fallback_applied)
             if result['would_save']:
                 ableton_set.save_set()
                 result['saved'] = True
@@ -557,7 +840,7 @@ def resolve_missing_media(
             still_missing_names = sorted(missing_after_names)
             result['missing_roots'] = _collect_missing_roots(missing_after_refs)
             result['missing_sample_details'] = _unresolved_sample_details(
-                missing_after_refs, name_index
+                missing_after_refs, name_index, project_dir=als_path.parent
             )
 
             # Attribute fixes to their execution mode, capped to the actual
@@ -595,6 +878,7 @@ def resolve_missing_media(
             _collect_external_sample_names(analysis_set, als_path)
         )
         result['external_sample_refs'] = len(result['external_sample_names'])
+        result['external_sample_details'] = _collect_external_sample_details(analysis_set, als_path)
 
         if result['would_save'] and not dry_run:
             logger.info(

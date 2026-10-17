@@ -34,8 +34,10 @@ ACCENT_GREEN = "#b6fdb6"
 ACCENT_RED = "#e06060"
 ACCENT_CYAN = "#aeffff"
 ACCENT_NEUTRAL = "#9d9d9d"
+
 ADD_ALL_TO_QUEUE = "#d4d4d4"
 ADD_FOLDER = "#d4d4d4"
+BTN_COLOR_PAUSE = "#d4d4d4"
 
 # ---------- Tree Row Styling ---------
 BG_TREE        = "#131313" 
@@ -74,6 +76,7 @@ BTN_COLOR_GO = ACCENT_GREEN
 BTN_COLOR_CLEAR = ACCENT_RED
 BTN_COLOR_NEUTRAL = ACCENT_NEUTRAL
 BTN_COLOR_UTILITY = ACCENT_CYAN
+
 
 SCROLLBAR_TRACK = "#0E0E0E"
 SCROLLBAR_THUMB = "#727272"
@@ -225,6 +228,64 @@ def enable_dark_title_bar(window):
             )
     except (AttributeError, OSError):
         pass
+
+
+def load_icon(name, size=18):
+    """Load app/icons/<name>.png as a Tk image (PIL-resized), or None."""
+    try:
+        from PIL import Image, ImageTk
+
+        if getattr(sys, "frozen", False):
+            path = Path(sys._MEIPASS) / "assets" / "icons" / f"{name}.png"
+        else:
+            path = Path(__file__).resolve().parent / "icons" / f"{name}.png"
+        image = Image.open(path).convert("RGBA").resize(
+            (size, size), Image.LANCZOS
+        )
+        return ImageTk.PhotoImage(image)
+    except Exception:
+        return None
+
+
+def make_icon_button(parent, icon_name, command, size=20, bg=None):
+    """Flat clickable icon (no text); returns the Label widget."""
+    bg = bg or BG_WINDOW
+    image = load_icon(icon_name, size)
+    button = tk.Label(
+        parent, image=image, bg=bg, cursor="hand2", bd=0, padx=3, pady=3
+    )
+    button.image = image
+    button.bind("<Button-1>", lambda _event: command())
+    button.bind("<Enter>", lambda _e: button.config(bg=BG_PANEL))
+    button.bind("<Leave>", lambda _e: button.config(bg=bg))
+    return button
+
+
+def bind_directory_context_menu(root, listbox, on_remove, on_add):
+    """Right-click menu for a directory listbox: Remove Selected, Add Folder."""
+
+    def show(event):
+        index = listbox.nearest(event.y)
+        if 0 <= index < listbox.size() and not listbox.selection_includes(index):
+            listbox.selection_clear(0, tk.END)
+            listbox.selection_set(index)
+        menu = tk.Menu(
+            root,
+            tearoff=False,
+            bg=BG_INPUT,
+            fg=FG_PRIMARY,
+            activebackground=BG_SELECTED,
+            activeforeground=FG_SELECTED,
+            borderwidth=1,
+            relief=tk.FLAT,
+            font=FONT_UI,
+        )
+        menu.add_command(label="Remove Selected", command=on_remove)
+        menu.add_command(label="Add Folder...", command=on_add)
+        menu.tk_popup(event.x_root, event.y_root)
+        return "break"
+
+    listbox.bind("<Button-3>", show)
 
 
 def set_window_icon(window):

@@ -2,6 +2,7 @@
 
 import json
 import logging
+import os
 import pathlib
 from threading import Event
 
@@ -15,8 +16,22 @@ SampleRecord = dict[str, str | int | float]
 DatabaseT = dict[str, SampleRecord]
 
 
+class IndexCancelled(Exception):
+    """Raised when a sample index build is cancelled before it is saved."""
+
+
+def _checkpoint(pause_event, cancel_event):
+    """Block while paused, then abort if the build was cancelled."""
+    if pause_event is not None:
+        pause_event.wait()
+    if cancel_event is not None and cancel_event.is_set():
+        raise IndexCancelled()
+
+
 def get_all_audio_files(
-    path: pathlib.Path, pause_event: Event | None = None
+    path: pathlib.Path,
+    pause_event: Event | None = None,
+    cancel_event: Event | None = None,
 ) -> list[pathlib.Path]:
     """Find all supported audio files in directory."""
     file_suffixes = [
@@ -39,8 +54,7 @@ def get_all_audio_files(
     all_files: list[pathlib.Path] = []
     for file_type in file_suffixes:
         for audio_file in path.rglob(file_type):
-            if pause_event is not None:
-                pause_event.wait()
+            _checkpoint(pause_event, cancel_event)
             all_files.append(audio_file)
     return all_files
 
@@ -50,6 +64,7 @@ def create_or_update_db(
     db_path: pathlib.Path | None = None,
     progress_callback=None,
     pause_event: Event | None = None,
+    cancel_event: Event | None = None,
     ) -> pathlib.Path:
     """Search all samples and add to database, create new one if it doesn't exist.
 
@@ -96,9 +111,10 @@ def create_or_update_db(
         progress_callback("discovering", 0, len(paths))
 
     for path_index, path in enumerate(paths, start=1):
-        if pause_event is not None:
-            pause_event.wait()
-        found = get_all_audio_files(pathlib.Path(path), pause_event)
+        _checkpoint(pause_event, cancel_event)
+        found = get_all_audio_files(
+            pathlib.Path(path), pause_event, cancel_event
+        )
         all_files.extend(found)
 
         if progress_callback:
@@ -118,8 +134,7 @@ def create_or_update_db(
     # "'NoneType' object has no attribute 'write'". Progress goes through
     # progress_callback to the GUI label instead.
     for index, path in enumerate(db_items, start=1):
-        if pause_event is not None:
-            pause_event.wait()
+        _checkpoint(pause_event, cancel_event)
         if not pathlib.Path(path).exists():
             to_remove.append(path)
 
@@ -135,8 +150,7 @@ def create_or_update_db(
     file_total = len(all_files)
 
     for index, sample in enumerate(all_files, start=1):
-        if pause_event is not None:
-            pause_event.wait()
+        _checkpoint(pause_event, cancel_event)
         if str(sample.resolve()) not in db:
             db[str(sample.resolve())] = {
                 "name": sample.name,
@@ -150,12 +164,14 @@ def create_or_update_db(
                 index,
                 file_total,
             )
-    # Write db!
-    if pause_event is not None:
-        pause_event.wait()
+    # Write db! Cancelling stops before this point, so the last saved index
+    # stays untouched; the replace below keeps the write atomic.
+    _checkpoint(pause_event, cancel_event)
+    temporary_path = db_path.with_name(db_path.name + ".tmp")
     try:
-        with db_path.open("w") as f:
+        with temporary_path.open("w") as f:
             json.dump(db, f, indent=2, sort_keys=True)
+        os.replace(temporary_path, db_path)
     except OSError as e:
         raise OSError(
             f"Could not write database to {db_path}. Check permissions: {e}"

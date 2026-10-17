@@ -87,7 +87,8 @@ def open_missing_media_window(gui, selected_tab="sample_index"):
     win.title("Missing Media")
     win.configure(bg=BG_WINDOW)
     win.geometry("620x640")
-    win.minsize(560, 520)
+    win.minsize(620, 640)
+    win.resizable(False, False)
 
     content = tk.Frame(win, bg=BG_WINDOW)
     content.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)

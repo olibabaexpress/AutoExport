@@ -13,6 +13,8 @@ if not (tesseract / "tesseract.exe").is_file() or not (tesseract / "tessdata" / 
 
 datas = []
 datas.append((str(root / "packaging" / "autoexport.ico"), "assets"))
+for icon_png in (root / "app" / "icons").glob("*.png"):
+    datas.append((str(icon_png), "assets/icons"))
 binaries = []
 hiddenimports = []
 for package in ("CTkMenuBar", "customtkinter", "tkinterdnd2", "live", "abletoolz"):

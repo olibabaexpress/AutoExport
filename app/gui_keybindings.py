@@ -76,7 +76,7 @@ PROJECT_HOTKEYS = {
     "ctrl+z": hotkey("toggle_normalize_selected", "Toggle normalize"),
     "w": hotkey("toggle_wet_dry_selected", "Toggle wet/dry"),
     # Misc
-    "p": hotkey("set_export_path", "Set export path"),
+    "ctrl+o": hotkey("set_export_path", "Set export path"),
 }
 
 QUEUE_HOTKEYS = {
@@ -107,7 +107,7 @@ QUEUE_HOTKEYS = {
     "n": hotkey("_toggle_queue_option_hotkey", "Toggle normalize", "normalize", False),
     "z": hotkey("_toggle_queue_option_hotkey", "Toggle normalize", "normalize", False),
     "w": hotkey("_toggle_queue_option_hotkey", "Toggle wet/dry", "wet_dry", False),
-    "p": hotkey("set_export_path", "Set export path"),
+    "ctrl+o": hotkey("set_export_path", "Set export path"),
 }
 
 

@@ -6,7 +6,7 @@ import re
 import threading
 import tkinter as tk
 from datetime import datetime
-from tkinter import filedialog, messagebox
+from tkinter import filedialog, messagebox, ttk
 
 from gui_file_drop import (
     bind_directory_listbox_hotkeys,
@@ -34,6 +34,8 @@ from gui_theme import (
     BG_PANEL,
     FONT_UI_BOLD,
     create_dark_scrollbar,
+    bind_directory_context_menu,
+    make_icon_button,
     make_outline_button,
 )
 
@@ -122,10 +124,30 @@ def start_selected_media_scan(gui, project_paths, mode):
     ).start()
 
 
+class IconToggle:
+    """Adapter giving an icon label the show/hide semantics of a button."""
+
+    def __init__(self, label, column):
+        self.label = label
+        self.column = column
+
+    def config(self, state=None, command=None, **_ignored):
+        if command is not None:
+            self.label.bind("<Button-1>", lambda _event: command())
+        if state == tk.DISABLED:
+            self.label.grid_remove()
+        elif state == tk.NORMAL:
+            self.label.grid(row=0, column=self.column, padx=(0, 2))
+
+    configure = config
+
+
 def build_bulk_fix_contents(gui, parent):
     """Build project-folder controls and the missing-media scan/report UI."""
+    header_row = tk.Frame(parent, bg=BG_WINDOW)
+    header_row.pack(fill=tk.X, padx=5, pady=(10, 5))
     tk.Label(
-        parent,
+        header_row,
         text=(
             "Project folders"
         ),
@@ -134,7 +156,9 @@ def build_bulk_fix_contents(gui, parent):
         font=FONT_HEADER,
         anchor="w",
         justify="left",
-    ).pack(fill=tk.X, padx=5, pady=(10, 5))
+    ).pack(side=tk.LEFT)
+    header_add_holder = tk.Frame(header_row, bg=BG_WINDOW)
+    header_add_holder.pack(side=tk.LEFT, padx=(8, 0))
 
     list_frame = tk.Frame(
         parent,
@@ -210,49 +234,13 @@ def build_bulk_fix_contents(gui, parent):
 
     bind_directory_listbox_hotkeys(listbox, remove_selected)
 
-    button_row = tk.Frame(parent, bg=BG_WINDOW)
-    button_row.pack(fill=tk.X, padx=5, pady=(0, 10))
-
-    top_button_group = tk.Frame(button_row, bg=BG_WINDOW)
-    top_button_group.pack(anchor="center")
-
-    TOP_BUTTON_WIDTH = 150
-    TOP_BUTTON_HEIGHT = 30
-    TOP_BUTTON_GAP = 6
-
-    def make_top_button(text, command, color):
-        slot = tk.Frame(
-            top_button_group,
-            bg=BG_WINDOW,
-            width=TOP_BUTTON_WIDTH,
-            height=TOP_BUTTON_HEIGHT,
-        )
-        slot.pack(side=tk.LEFT, padx=(0, TOP_BUTTON_GAP))
-        slot.pack_propagate(False)
-
-        button = make_outline_button(
-            slot,
-            text,
-            command,
-            color,
-            font=FONT_UI,
-            padx=4,
-            pady=4,
-        )
-        button.pack(fill=tk.BOTH, expand=True)
-        return button
-    make_top_button(
-    "Add Folder...",
-    add_directory,
-    BTN_COLOR_MAIN,
+    add_folder_button = make_icon_button(
+        header_add_holder, "add-folder", add_directory, size=20
     )
-
-    make_top_button(
-        "Remove Selected",
-        remove_selected,
-        BTN_COLOR_CLEAR,
+    add_folder_button.pack()
+    bind_directory_context_menu(
+        gui.root, listbox, remove_selected, add_directory
     )
-    
 
     progress_var = tk.StringVar(value="Ready")
 
@@ -287,6 +275,34 @@ def build_bulk_fix_contents(gui, parent):
         fill=tk.X,
         expand=True,
     )
+
+    progress_row = tk.Frame(parent, bg=BG_WINDOW)
+    progress_row.pack(fill=tk.X, padx=(5, 20), pady=(0, 8))
+    # Fixed-size slot so showing/hiding the icons never shifts the layout.
+    scan_icon_slot = tk.Frame(progress_row, bg=BG_WINDOW, width=64, height=30)
+    scan_icon_slot.pack(side=tk.RIGHT, padx=(6, 0))
+    scan_icon_slot.pack_propagate(False)
+    scan_icon_slot.grid_propagate(False)
+
+    scan_progress_bar = ttk.Progressbar(
+        progress_row,
+        mode="determinate",
+        maximum=1,
+        value=0,
+        style="MissingMedia.Horizontal.TProgressbar",
+    )
+    scan_progress_bar.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+    def update_scan_progress_bar(*_args):
+        message = progress_var.get()
+        match = re.match(r"\[(\d+)/(\d+)\]", message)
+        if match:
+            scan_progress_bar.configure(maximum=max(1, int(match.group(2))))
+            scan_progress_bar["value"] = int(match.group(1))
+        elif message.startswith(("Preparing", "Stopped", "Error", "Ready")):
+            scan_progress_bar["value"] = 0
+
+    progress_var.trace_add("write", update_scan_progress_bar)
 
     report_frame = tk.Frame(
         parent,
@@ -398,8 +414,6 @@ def build_bulk_fix_contents(gui, parent):
     scan_row.pack(anchor="w")
     control_row = tk.Frame(button_group, bg=BG_WINDOW)
     control_row.pack(fill=tk.X)
-    control_left = tk.Frame(control_row, bg=BG_WINDOW)
-    control_left.pack(side=tk.LEFT)
     control_right = tk.Frame(control_row, bg=BG_WINDOW)
     control_right.pack(side=tk.RIGHT)
 
@@ -446,12 +460,12 @@ def build_bulk_fix_contents(gui, parent):
         "Scan (Preview Only)", None, BTN_COLOR_MAIN, scan_row
     )
 
-    pause_button = make_bottom_button(
-        "Pause", None, BTN_COLOR_NEUTRAL, control_left, state=tk.DISABLED
+    pause_button = IconToggle(
+        make_icon_button(scan_icon_slot, "pause", lambda: None, size=22), 0
     )
 
-    stop_button = make_bottom_button(
-        "Stop", None, BTN_COLOR_CLEAR, control_left, state=tk.DISABLED
+    stop_button = IconToggle(
+        make_icon_button(scan_icon_slot, "cancel", lambda: None, size=22), 1
     )
 
     save_report_button = make_bottom_button(
@@ -812,37 +826,6 @@ def build_bulk_fix_contents(gui, parent):
         )
 
     def run(dry_run, mode="collect"):
-        if dry_run:
-            confirm = messagebox.askyesno(
-                "Scan (Preview Only)",
-                "This will scan every .als file under the configured project "
-                "folders and check for missing media against the current "
-                "sample index.\n\nThis is a PREVIEW - no project files will "
-                "be modified.\n\nThis can take a while for a large library. "
-                "Continue?",
-            )
-        else:
-            confirm = messagebox.askyesno(
-                "Scan & Relink" if mode == "relink" else "Scan & Collect",
-                "This will scan every .als file under the configured project "
-                "folders and SAVE any missing-media fixes it can resolve "
-                "from the current sample index.\n\nabletoolz backs up each "
-                "original automatically under abletoolz_backup/ before "
-                "saving. A match requires the same filename and exact "
-                "OriginalFileSize; modification time alone is not enough. "
-                + (
-                    "Matched references are updated to the indexed audio "
-                    "file's absolute path; no audio files are copied."
-                    if mode == "relink"
-                    else "Matched external samples are copied into the project "
-                    "and references are updated to those collected copies."
-                )
-                + "\n\nThis "
-                "can take a while for a large "
-                "library. Continue?",
-            )
-        if not confirm:
-            return
 
         scan_state.update({
             "active": False,

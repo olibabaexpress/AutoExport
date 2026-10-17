@@ -78,6 +78,7 @@ def build_or_update_index(
     directories=None,
     progress_callback=None,
     pause_event: Event | None = None,
+    cancel_event: Event | None = None,
 ):
     """
     Scan the configured (or given) directories and build/update the sample database.
@@ -122,6 +123,7 @@ def build_or_update_index(
         db_path=DB_PATH,
         progress_callback=progress_callback,
         pause_event=pause_event,
+        cancel_event=cancel_event,
     )
     db = create_db_patch.load_db(db_path)
 

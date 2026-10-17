@@ -1,4 +1,4 @@
-"""File, Edit, and Tools menu construction for the launcher GUI."""
+"""File, Select, and Tools menu construction for the launcher GUI."""
 
 import os
 import tkinter as tk
@@ -48,7 +48,7 @@ class FileMenuMixin:
             )
             return False
     def create_menu(self):
-        """Create the themed File, Edit, and Tools menus."""
+        """Create the themed File, Select, and Tools menus."""
         self.menu_bar = CTkMenuBar(
             self.menu_container,
             bg_color=BG_TOOLBAR,
@@ -216,7 +216,7 @@ class FileMenuMixin:
             None,
             ("Exit", self.root.quit, "Close AutoExport."),
         ])
-        add_menu("Edit", [
+        add_menu("Select", [
             (menu_label("Select All", "select_all_rows"), self.select_all_rows,
              "Select every visible project."),
             (menu_label("Deselect All", "clear_multi_selection"), self.clear_multi_selection,

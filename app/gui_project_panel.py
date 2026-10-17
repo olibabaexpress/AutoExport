@@ -3,6 +3,7 @@
 import json
 import logging
 import os
+import subprocess
 import time
 from pathlib import Path
 import tkinter as tk
@@ -12,8 +13,12 @@ import customtkinter as ctk
 from paths import data_file
 
 from gui_keybindings import PROJECT_HOTKEYS, hotkey_texts
-from project_media_status import format_project_missing_lines
+from project_media_status import (
+    format_project_candidate_lines,
+    format_project_missing_lines,
+)
 from gui_theme import (
+    style_setup,
     ACCENT_CYAN,
     ACCENT_NEUTRAL,
     BG_BUTTON,
@@ -70,13 +75,19 @@ def _tags_with_selection(tags, selected):
     return tuple(mapping.get(tag, tag) for tag in tags)
 
 
+UNRESOLVED_MEDIA_LABELS = ("Missing", "Candidates")
 PROJECT_MEDIA_STATUS_LABELS = {
     "Missing",
     "Missing Media",
+    "Candidates",
     "Linked",
     "Portable",
 }
 PROJECT_MEDIA_STATUS_EXPLANATIONS = {
+    "Candidates": (
+        "Some samples were found in several different places and need a "
+        "human choice. Open the project in Ableton to audition them."
+    ),
     "Missing": (
         "The saved scan found samples that are unresolved or missing."
     ),
@@ -466,7 +477,8 @@ class ProjectPanelMixin:
             self.path_to_tree_item[path]
             for path in self.path_to_tree_item
             if self.path_to_tree_item[path] in visible_files
-            and self._project_media_status_label(path) == "Missing"
+            and self._project_media_status_label(path)
+            in UNRESOLVED_MEDIA_LABELS
         }
         self.last_selected_item = next(iter(self.multi_selection), None)
         self.project_selection_anchor = self.last_selected_item
@@ -478,7 +490,8 @@ class ProjectPanelMixin:
         self._load_project_media_status()
         paths = [
             path for path in self.selected_projects
-            if self._project_media_status_label(path) == "Missing"
+            if self._project_media_status_label(path)
+            in UNRESOLVED_MEDIA_LABELS
         ]
         for path in paths:
             self.selected_projects[path]["enabled"] = False
@@ -488,6 +501,12 @@ class ProjectPanelMixin:
     def on_project_context_menu(self, event):
         item = self.tree.identify("item", event.x, event.y)
         project_path = self.tree_item_to_path.get(item)
+        if (
+            item
+            and project_path is not None
+            and self.tree.identify_column(event.x) == "#0"
+        ):
+            return self._show_project_file_menu(event, item, project_path)
         if (
             not item
             or project_path is None
@@ -520,11 +539,20 @@ class ProjectPanelMixin:
             font=FONT_UI,
         )
         clicked_path = self.tree_item_to_path[item]
-        if self._project_media_status_label(clicked_path) == "Missing":
+        if self._project_media_status_label(clicked_path) in (
+            UNRESOLVED_MEDIA_LABELS
+        ):
             menu.add_command(
                 label="What's Missing?",
                 command=lambda path=clicked_path:
                     self._show_project_media_status(path),
+            )
+            menu.add_separator()
+        elif self._project_media_status_label(clicked_path) == "Linked":
+            menu.add_command(
+                label="What's External?",
+                command=lambda path=clicked_path:
+                    self._show_project_external_samples(path),
             )
             menu.add_separator()
         menu.add_command(
@@ -547,6 +575,12 @@ class ProjectPanelMixin:
                 self.show_status_tooltip(
                     "What's Missing?: Lists this project's missing samples "
                     "and their saved paths."
+                )
+                return
+            if label.startswith("What's External"):
+                self.show_status_tooltip(
+                    "What's External?: Lists this project's known "
+                    "external samples."
                 )
                 return
             mode = "relink" if "Relink" in label else "collect"
@@ -700,6 +734,8 @@ class ProjectPanelMixin:
         categories = entry.get("categories", ())
         if not isinstance(categories, (list, tuple, set)):
             categories = ()
+        if "candidate_review" in categories:
+            return "Candidates"
         if "unresolved_missing_media" in categories:
             return "Missing"
         if "non_portable" in categories:
@@ -743,16 +779,99 @@ class ProjectPanelMixin:
             return "\n".join(f"  • {name}" for name in names) or "  None recorded"
 
         lines = format_project_missing_lines(entry or {})
+        candidate_lines = format_project_candidate_lines(entry or {})
         message = (
             f"{os.path.basename(project_path)}\n"
             f"Status: {status}\n{details}\n\n"
             f"Missing samples and their configured paths ({len(lines)}):\n"
             + ("\n".join(lines) if lines else "  None recorded")
+            + (
+                f"\n\nSamples needing a choice ({len(candidate_lines)}):\n"
+                + "\n".join(candidate_lines)
+                if candidate_lines
+                else ""
+            )
             + f"\n\nKnown external samples ({len(external_names)}):\n"
             + format_name_list(external_names)
         )
         self._open_copyable_text_window(
             f"What's Missing - {os.path.basename(project_path)}", message
+        )
+
+    def _show_project_file_menu(self, event, item, project_path):
+        if item not in self.multi_selection:
+            self._set_project_selection(item)
+        menu = tk.Menu(
+            self.root,
+            tearoff=False,
+            bg=BG_INPUT,
+            fg=FG_PRIMARY,
+            activebackground=BG_SELECTED,
+            activeforeground=FG_SELECTED,
+            borderwidth=1,
+            relief=tk.FLAT,
+            font=FONT_UI,
+        )
+        menu.add_command(
+            label="Open in Explorer",
+            command=lambda: self._open_project_in_explorer(project_path),
+        )
+        menu.add_command(
+            label="Open in Ableton",
+            command=lambda: self._open_project_in_ableton(project_path),
+        )
+
+        menu.tk_popup(event.x_root, event.y_root)
+        return "break"
+
+    def _open_project_in_ableton(self, project_path):
+        try:
+            os.startfile(project_path)
+        except OSError as error:
+            messagebox.showerror(
+                "Open in Ableton", f"Could not open the project:\n{error}"
+            )
+
+    def _open_project_in_explorer(self, project_path):
+        try:
+            subprocess.Popen(
+                ["explorer", "/select,", os.path.normpath(project_path)]
+            )
+        except OSError as error:
+            messagebox.showerror(
+                "Open in Explorer", f"Could not open Explorer:\n{error}"
+            )
+
+    def _show_project_external_samples(self, project_path):
+        entry = self._load_project_media_status().get(
+            self._project_media_status_key(project_path)
+        ) or {}
+        details = entry.get("external_sample_details") or []
+        if details:
+            seen = {}
+            for detail in details:
+                name = detail.get("name") or ""
+                path = detail.get("path") or ""
+                seen.setdefault(name, [])
+                if path and path not in seen[name]:
+                    seen[name].append(path)
+            body = "\n".join(
+                f"{name}\n" + "\n".join(f"   Path: {p}" for p in paths)
+                if paths
+                else name
+                for name, paths in sorted(seen.items(), key=lambda i: i[0].casefold())
+            )
+            count = len(seen)
+        else:
+            names = self._format_saved_sample_names(
+                entry.get("external_sample_names", ())
+            )
+            body = "\n".join(f"  • {name}" for name in names) or "  None recorded"
+            count = len(names)
+        self._open_copyable_text_window(
+            f"What's External - {os.path.basename(project_path)}",
+            f"{os.path.basename(project_path)}\n"
+            f"Known external samples ({count}):\n\n{body}",
         )
 
     def _open_copyable_text_window(self, title, text):
@@ -761,6 +880,7 @@ class ProjectPanelMixin:
         window.configure(bg=BG_WINDOW)
         window.geometry("820x480")
         window.transient(self.root)
+        style_setup(window)
         frame = tk.Frame(window, bg=BG_WINDOW)
         frame.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
         scrollbar = create_dark_scrollbar(frame)
@@ -1363,7 +1483,9 @@ class ProjectPanelMixin:
             and self.tree.identify_column(event.x) == "#1"
         ):
             project_path = self.tree_item_to_path[item]
-            if self._project_media_status_label(project_path) == "Missing":
+            if self._project_media_status_label(project_path) in (
+                UNRESOLVED_MEDIA_LABELS
+            ):
                 self._show_project_media_status(project_path)
             return "break"
         if (
