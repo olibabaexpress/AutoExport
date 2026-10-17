@@ -35,6 +35,7 @@ ACCENT_RED = "#e06060"
 ACCENT_CYAN = "#aeffff"
 ACCENT_NEUTRAL = "#9d9d9d"
 ADD_ALL_TO_QUEUE = "#d4d4d4"
+ADD_FOLDER = "#d4d4d4"
 
 # ---------- Tree Row Styling ---------
 BG_TREE        = "#131313" 

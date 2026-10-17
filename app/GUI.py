@@ -5,7 +5,7 @@ Allows users to configure which operations to run for each project
 import os
 import sys
 import tkinter as tk
-from tkinter import messagebox, filedialog
+from tkinter import messagebox
 from gui_file_drop import parse_dropped_paths
 from gui_keybindings import HotkeyMixin
 from gui_size_estimates import SizeEstimateMixin
@@ -19,7 +19,6 @@ from datetime import datetime
 import queue
 import multiprocessing
 from concurrent.futures import ThreadPoolExecutor
-from export_path_config import get_export_path, set_export_path as set_export_path_config
 from gui_theme import (
     BG_INPUT, BG_WINDOW, BG_SEPARATOR, FG_PRIMARY,
     PROJECT_TREE_COLUMN_WIDTHS,
@@ -350,76 +349,6 @@ class AutoExportLauncherGUI(
         for file_path in files:
             self.add_path(file_path)
     
-    def add_path(self, path):
-        """Add folder/file to project list"""
-        if not os.path.exists(path):
-            messagebox.showerror("Error", f"Path does not exist:\n{path}")
-            return
-        
-        projects = {}
-        
-        if (
-            os.path.isfile(path)
-            and path.casefold().endswith('.als')
-            and not ProjectFinder.is_backup_path(path)
-        ):
-            folder_path = os.path.dirname(path)
-            projects[folder_path] = {
-                "path": folder_path,
-                "files": [path]
-            }
-        elif os.path.isdir(path):
-            projects = ProjectFinder.find_projects(path)
-        
-        if not projects:
-            messagebox.showinfo("No Projects Found", f"No .als files found in:\n{path}")
-            return
-        
-        # Add to our collection (keys are full folder paths, so no collisions)
-        self.projects_by_folder.update(projects)
-
-        # Default-config every file that isn't already configured
-        for proj in projects.values():
-            for file_path in proj["files"]:
-                if file_path not in self.selected_projects:
-                    self.selected_projects[file_path] = self._default_project_config(
-                        file_path
-                    )
-        
-        # Refresh UI
-        self.update_tree()
-
-    def set_export_path(self):
-        """Allow the user to choose the base export folder."""
-
-        current_path = get_export_path()
-
-        selected_folder = filedialog.askdirectory(
-            title="Select Export Folder",
-            initialdir=current_path if os.path.isdir(current_path) else None,
-            mustexist=True,
-        )
-
-        if not selected_folder:
-            return False
-
-        try:
-            set_export_path_config(selected_folder)
-
-            messagebox.showinfo(
-                "Export Folder",
-                f"Export folder set to:\n\n{selected_folder}"
-            )
-            return True
-
-        except Exception as e:
-            messagebox.showerror(
-                "Export Folder",
-                f"Could not save export folder:\n\n{e}"
-            )
-            return False
-
-
     def open_bulk_fix_window(self):
          """Open Missing Media on its Bulk Fix tab."""
          self.open_missing_media_window("bulk_fix")

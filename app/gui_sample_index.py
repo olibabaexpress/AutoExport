@@ -16,6 +16,8 @@ from gui_theme import (
     ACCENT_GREEN,
     ACCENT_ORANGE,
     ACCENT_RED,
+    ADD_FOLDER,
+    BG_INPUT,
     BG_PANEL,
     BG_SELECTION,
     BG_TREE,
@@ -26,6 +28,8 @@ from gui_theme import (
     FG_PRIMARY,
     FG_SELECTED,
     FONT_UI,
+    FONT_HEADER,
+    FONT_UI_BOLD,
     create_dark_scrollbar,
     make_outline_button,
 )
@@ -47,7 +51,7 @@ def build_sample_index_contents(gui, parent):
         text="Directories to scan for samples. ",
         bg=BG_WINDOW,
         fg=FG_PRIMARY,
-        font=FONT_UI,
+        font=FONT_HEADER,
         anchor="w",
         justify="left",
     ).pack(fill=tk.X, padx=5, pady=(10, 5))
@@ -189,29 +193,39 @@ def build_sample_index_contents(gui, parent):
         button_row,
         "Add Folder...",
         add_directory,
-        BTN_COLOR_MAIN,
+        ADD_FOLDER,
+        font=FONT_UI_BOLD,
         padx=10,
         pady=4,
-    ).pack(side=tk.LEFT, padx=(0, 5))
+        width=12,
+        height=1,
+    ).pack(side=tk.LEFT, padx=(0, 5), pady=(0, 4))
     make_outline_button(
         button_row,
-        "Remove Selected",
+        "Remove",
         remove_selected,
         BTN_COLOR_CLEAR,
+        font=FONT_UI_BOLD,
         padx=10,
         pady=4,
-    ).pack(side=tk.LEFT)
+        width=12,
+        height=1,
+    ).pack(side=tk.LEFT, padx=(0, 5), pady=(0, 4))
 
     status_var = tk.StringVar(value="Index: checking...")
 
     tk.Label(
         footer,
         textvariable=status_var,
-        bg=BG_WINDOW,
+        bg=BG_INPUT,
         fg=ACCENT_GREEN,
         font=FONT_UI,
         anchor="w",
-    ).pack(fill=tk.X, padx=5)
+        relief=tk.GROOVE,
+        bd=1,
+        padx=10,
+        pady=5,
+    ).pack(fill=tk.X, padx=6, pady=4,)
     threading.Thread(
         target=load_index_coverage,
         name="sample-index-coverage",

@@ -1,6 +1,7 @@
 """UI for scanning and repairing missing media in Ableton projects."""
 
 import logging
+import os
 import re
 import threading
 import tkinter as tk
@@ -28,6 +29,7 @@ from gui_theme import (
     ACCENT_NEUTRAL,
     FG_PRIMARY,
     FG_SELECTED,
+    FONT_HEADER,
     FONT_UI,
     BG_PANEL,
     FONT_UI_BOLD,
@@ -37,7 +39,10 @@ from gui_theme import (
 
 from missing_media_resolver import format_bulk_report, resolve_missing_media_bulk
 from project_scanner import find_all_projects, load_project_dirs, save_project_dirs
-from project_media_status import save_project_media_status
+from project_media_status import (
+    missing_audio_list_path,
+    save_project_media_status,
+)
 from sample_database import load_index as load_sample_index
 
 logger = logging.getLogger("AutoExport")
@@ -126,7 +131,7 @@ def build_bulk_fix_contents(gui, parent):
         ),
         bg=BG_WINDOW,
         fg=FG_PRIMARY,
-        font=FONT_UI,
+        font=FONT_HEADER,
         anchor="w",
         justify="left",
     ).pack(fill=tk.X, padx=5, pady=(10, 5))
@@ -388,7 +393,15 @@ def build_bulk_fix_contents(gui, parent):
         pady=(0, 10),
     )
     button_group = tk.Frame(bottom_row, bg=BG_WINDOW)
-    button_group.pack(anchor="center")
+    button_group.pack(fill=tk.X)
+    scan_row = tk.Frame(button_group, bg=BG_WINDOW)
+    scan_row.pack(anchor="w")
+    control_row = tk.Frame(button_group, bg=BG_WINDOW)
+    control_row.pack(fill=tk.X)
+    control_left = tk.Frame(control_row, bg=BG_WINDOW)
+    control_left.pack(side=tk.LEFT)
+    control_right = tk.Frame(control_row, bg=BG_WINDOW)
+    control_right.pack(side=tk.RIGHT)
 
     # Equal-width slots prevent buttons resizing when their text changes.
     BUTTON_WIDTH = 132
@@ -396,15 +409,15 @@ def build_bulk_fix_contents(gui, parent):
     BUTTON_GAP = 6
 
     def make_bottom_button(
-        text, command, color, row, column, state=tk.NORMAL
+        text, command, color, container, state=tk.NORMAL
     ):
         slot = tk.Frame(
-            button_group,
+            container,
             bg=BG_WINDOW,
             width=BUTTON_WIDTH,
             height=BUTTON_HEIGHT,
         )
-        slot.grid(row=row, column=column, padx=BUTTON_GAP // 2, pady=2)
+        slot.pack(side=tk.LEFT, padx=BUTTON_GAP // 2, pady=2)
         slot.pack_propagate(False)
 
         button = make_outline_button(
@@ -422,53 +435,34 @@ def build_bulk_fix_contents(gui, parent):
         return button
 
     relink_button = make_bottom_button(
-        "Scan & Relink",
-        None,
-        BTN_COLOR_GO,
-        0,
-        0,
+        "Scan & Relink", None, BTN_COLOR_GO, scan_row
     )
 
     collect_button = make_bottom_button(
-        "Scan & Collect",
-        None,
-        BTN_COLOR_GO,
-        1,
-        0,
+        "Scan & Collect", None, BTN_COLOR_GO, scan_row
     )
 
     scan_button = make_bottom_button(
-        "Scan (Preview Only)",
-        None,
-        BTN_COLOR_MAIN,
-        0,
-        2,
+        "Scan (Preview Only)", None, BTN_COLOR_MAIN, scan_row
     )
 
     pause_button = make_bottom_button(
-        "Pause",
-        None,
-        BTN_COLOR_NEUTRAL,
-        1,
-        0,
-        state=tk.DISABLED,
+        "Pause", None, BTN_COLOR_NEUTRAL, control_left, state=tk.DISABLED
     )
 
     stop_button = make_bottom_button(
-        "Stop",
-        None,
-        BTN_COLOR_CLEAR,
-        1,
-        1,
-        state=tk.DISABLED,
+        "Stop", None, BTN_COLOR_CLEAR, control_left, state=tk.DISABLED
     )
 
     save_report_button = make_bottom_button(
-        "Save Report...",
+        "Save Report...", None, BTN_COLOR_NEUTRAL, control_right
+    )
+
+    open_missing_list_button = make_bottom_button(
+        "Open Missing List",
         None,
         BTN_COLOR_NEUTRAL,
-        1,
-        2,
+        control_right,
     )
 
     scan_state = {
@@ -511,6 +505,26 @@ def build_bulk_fix_contents(gui, parent):
             messagebox.showinfo("Saved", f"Report saved to:\n{path}")
 
     save_report_button.config(command=save_report)
+
+    def open_missing_list():
+        path = missing_audio_list_path()
+        if not path.exists():
+            try:
+                save_project_media_status({}, merge=True)
+            except OSError:
+                pass
+        if not path.exists():
+            messagebox.showinfo(
+                "No Missing List",
+                "No missing audio list exists yet. Run a scan first.",
+            )
+            return
+        try:
+            os.startfile(path)
+        except OSError as error:
+            messagebox.showerror("Open Missing List", str(error))
+
+    open_missing_list_button.config(command=open_missing_list)
 
     report_frame.pack(
         fill=tk.BOTH,

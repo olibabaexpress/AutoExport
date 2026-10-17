@@ -12,6 +12,7 @@ import customtkinter as ctk
 from paths import data_file
 
 from gui_keybindings import PROJECT_HOTKEYS, hotkey_texts
+from project_media_status import format_project_missing_lines
 from gui_theme import (
     ACCENT_CYAN,
     ACCENT_NEUTRAL,
@@ -41,7 +42,7 @@ from gui_theme import (
     FONT_TREE,
     FONT_TREE_BOLD,
     FONT_TREE_HEADER,
-    FONT_UI,
+    FONT_TREE_MONO,    FONT_UI,
     FONT_UI_BOLD,
     PROJECT_TREE_COLUMNS,
     PROJECT_TREE_COLUMN_WIDTHS,
@@ -50,6 +51,24 @@ from gui_theme import (
 )
 
 logger = logging.getLogger("AutoExport")
+
+# Tk resolves conflicting tag options by tag creation order, which cannot be
+# controlled reliably. A selected row therefore swaps its base tag for a
+# self-contained selected variant instead of layering one over the other.
+_SELECTED_TAG_FOR = {
+    "enabled": "multi",
+    "disabled": "multi_disabled",
+    "folder_enabled": "multi_folder",
+    "folder_disabled": "multi_folder_disabled",
+}
+_BASE_TAG_FOR = {value: key for key, value in _SELECTED_TAG_FOR.items()}
+
+
+def _tags_with_selection(tags, selected):
+    """Return row tags with base tags swapped to/from selected variants."""
+    mapping = _SELECTED_TAG_FOR if selected else _BASE_TAG_FOR
+    return tuple(mapping.get(tag, tag) for tag in tags)
+
 
 PROJECT_MEDIA_STATUS_LABELS = {
     "Missing",
@@ -500,6 +519,14 @@ class ProjectPanelMixin:
             relief=tk.FLAT,
             font=FONT_UI,
         )
+        clicked_path = self.tree_item_to_path[item]
+        if self._project_media_status_label(clicked_path) == "Missing":
+            menu.add_command(
+                label="What's Missing?",
+                command=lambda path=clicked_path:
+                    self._show_project_media_status(path),
+            )
+            menu.add_separator()
         menu.add_command(
             label=f"Scan & Relink ({count} Items)",
             command=lambda paths=project_paths:
@@ -513,9 +540,15 @@ class ProjectPanelMixin:
 
         def show_menu_tooltip(event):
             index = menu.index(f"@{event.y}")
-            if index is None:
+            if index is None or menu.type(index) != "command":
                 return
             label = menu.entrycget(index, "label")
+            if label.startswith("What's Missing"):
+                self.show_status_tooltip(
+                    "What's Missing?: Lists this project's missing samples "
+                    "and their saved paths."
+                )
+                return
             mode = "relink" if "Relink" in label else "collect"
             action = (
                 "Updates references to indexed audio without copying files."
@@ -709,24 +742,59 @@ class ProjectPanelMixin:
         def format_name_list(names):
             return "\n".join(f"  • {name}" for name in names) or "  None recorded"
 
+        lines = format_project_missing_lines(entry or {})
         message = (
+            f"{os.path.basename(project_path)}\n"
             f"Status: {status}\n{details}\n\n"
-            f"Known external samples ({len(external_names)}):\n"
-            f"{format_name_list(external_names)}\n\n"
-            f"Unresolved / missing samples ({len(unresolved_names)}):\n"
-            f"{format_name_list(unresolved_names)}"
+            f"Missing samples and their configured paths ({len(lines)}):\n"
+            + ("\n".join(lines) if lines else "  None recorded")
+            + f"\n\nKnown external samples ({len(external_names)}):\n"
+            + format_name_list(external_names)
         )
-        if missing_details:
-            message += (
-                "\n\nMissing sample details:\n"
-                + json.dumps(missing_details, indent=2, ensure_ascii=False)
-            )
+        self._open_copyable_text_window(
+            f"What's Missing - {os.path.basename(project_path)}", message
+        )
 
-        messagebox.showinfo(
-            "Project Media Status",
-            message,
-            parent=self.root,
+    def _open_copyable_text_window(self, title, text):
+        window = tk.Toplevel(self.root)
+        window.title(title)
+        window.configure(bg=BG_WINDOW)
+        window.geometry("820x480")
+        window.transient(self.root)
+        frame = tk.Frame(window, bg=BG_WINDOW)
+        frame.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
+        scrollbar = create_dark_scrollbar(frame)
+        box = tk.Text(
+            frame,
+            wrap=tk.NONE,
+            bg=BG_INPUT,
+            fg=FG_PRIMARY,
+            insertbackground=FG_PRIMARY,
+            selectbackground=BG_SELECTION,
+            selectforeground=FG_SELECTED,
+            font=FONT_TREE_MONO,
+            relief=tk.FLAT,
+            yscrollcommand=scrollbar.set,
         )
+        scrollbar.configure(command=box.yview)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        box.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        box.insert("1.0", text)
+        # Read-only but still selectable/copyable.
+        box.bind(
+            "<Key>",
+            lambda e: None
+            if (e.state & 0x4 and e.keysym.lower() in ("c", "a"))
+            or e.keysym in ("Left", "Right", "Up", "Down", "Prior", "Next",
+                            "Home", "End")
+            else "break",
+        )
+        box.bind(
+            "<Control-a>",
+            lambda e: (box.tag_add("sel", "1.0", "end-1c"), "break")[1],
+        )
+        box.focus_set()
+        return window
 
 
     def _refresh_project_rows(self, project_paths):
@@ -738,13 +806,7 @@ class ProjectPanelMixin:
                 continue
             text, values, tags = self._project_row_display(path)
             if item in self.multi_selection:
-                tags = (
-                    "multi"
-                    if self.selected_projects.get(
-                        path, self._default_project_config(path)
-                    ).get("enabled", True)
-                    else "multi_disabled",
-                ) + tags
+                tags = _tags_with_selection(tags, True)
             current = self.tree.item(item)
             if (
                 current.get("text") != text
@@ -771,9 +833,7 @@ class ProjectPanelMixin:
                 "folder_enabled" if enabled_count else "folder_disabled",
             )
             if folder_id in self.multi_selection:
-                folder_tags = (
-                    "multi" if enabled_count else "multi_disabled",
-                ) + folder_tags
+                folder_tags = _tags_with_selection(folder_tags, True)
             self.tree.item(
                 folder_id,
                 text=f"📁 {folder_name} ({len(files)})",
@@ -1632,23 +1692,9 @@ class ProjectPanelMixin:
         for iid in changed:
             if not exists(iid):
                 continue
-            tags = [
-                t for t in self.tree.item(iid, "tags")
-                if t not in ("multi", "multi_disabled")
-            ]
-            if iid in selected:
-                # Treeview gives earlier tags higher priority. Put the
-                # selection tag before the enabled/disabled base tag so its
-                # foreground and background remain visible.
-                tags.insert(
-                    0,
-                    "multi_disabled"
-                    if (
-                        "disabled" in self.tree.item(iid, "tags")
-                        or "folder_disabled" in self.tree.item(iid, "tags")
-                    )
-                    else "multi"
-                )
+            tags = _tags_with_selection(
+                self.tree.item(iid, "tags"), iid in selected
+            )
             self.tree.item(iid, tags=tags)
         self._configure_selection_tags()
         current_native_selection = tuple(
@@ -1661,15 +1707,15 @@ class ProjectPanelMixin:
 
 
     def _configure_selection_tags(self):
-        # Tk gives the first-configured tag priority, so these must be
-        # configured before the base row tags.
-        self.tree.tag_configure(
-            "multi", background=BG_SELECTION, foreground=FG_SELECTED
+        selected = dict(background=BG_SELECTION, foreground=FG_SELECTED)
+        selected_disabled = dict(
+            background=ACCENT_NEUTRAL, foreground=FG_SELECTED_DISABLED
         )
+        self.tree.tag_configure("multi", **selected)
+        self.tree.tag_configure("multi_disabled", **selected_disabled)
+        self.tree.tag_configure("multi_folder", font=FONT_TREE_BOLD, **selected)
         self.tree.tag_configure(
-            "multi_disabled",
-            background=ACCENT_NEUTRAL,
-            foreground=FG_SELECTED_DISABLED,
+            "multi_folder_disabled", font=FONT_TREE_BOLD, **selected_disabled
         )
 
     def _activate_tree(self, active_tree):
@@ -1718,3 +1764,42 @@ class ProjectPanelMixin:
         elif event.num == 4 or event.delta > 0:
             self.tree.yview_scroll(-3, "units")
         return "break"  # Prevent default scrolling
+    
+    def add_path(self, path):
+        """Add folder/file to project list"""
+        if not os.path.exists(path):
+            messagebox.showerror("Error", f"Path does not exist:\n{path}")
+            return
+        
+        projects = {}
+        
+        if (
+            os.path.isfile(path)
+            and path.casefold().endswith('.als')
+            and not ProjectFinder.is_backup_path(path)
+        ):
+            folder_path = os.path.dirname(path)
+            projects[folder_path] = {
+                "path": folder_path,
+                "files": [path]
+            }
+        elif os.path.isdir(path):
+            projects = ProjectFinder.find_projects(path)
+        
+        if not projects:
+            messagebox.showinfo("No Projects Found", f"No .als files found in:\n{path}")
+            return
+        
+        # Add to our collection (keys are full folder paths, so no collisions)
+        self.projects_by_folder.update(projects)
+
+        # Default-config every file that isn't already configured
+        for proj in projects.values():
+            for file_path in proj["files"]:
+                if file_path not in self.selected_projects:
+                    self.selected_projects[file_path] = self._default_project_config(
+                        file_path
+                    )
+        
+        # Refresh UI
+        self.update_tree()

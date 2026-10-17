@@ -245,7 +245,8 @@ class ProjectBrowserStateTest(unittest.TestCase):
                                 "external_sample_names": ["external.wav"],
                                 "unresolved_sample_names": ["missing.wav"],
                                 "missing_sample_details": [
-                                    {"name": "missing.wav", "path": "Samples/"}
+                                    {"name": "missing.wav",
+                                     "stored_path": "Samples/missing.wav"}
                                 ],
                             }
                         ]
@@ -257,21 +258,20 @@ class ProjectBrowserStateTest(unittest.TestCase):
                 GUI.AutoExportLauncherGUI
             )
             gui.root = Mock()
+            gui._open_copyable_text_window = Mock()
 
             with patch(
                 "gui_project_panel.data_file",
                 return_value=str(status_path),
-            ), patch(
-                "gui_project_panel.messagebox.showinfo"
-            ) as showinfo:
+            ):
                 gui._show_project_media_status(project_path)
 
-            message = showinfo.call_args.args[1]
+            message = gui._open_copyable_text_window.call_args.args[1]
             self.assertIn("Status: Linked", message)
             self.assertIn("external.wav", message)
             self.assertIn("missing.wav", message)
-            self.assertIn("Missing sample details", message)
-            showinfo.assert_called_once()
+            self.assertIn("Samples/missing.wav", message)
+            gui._open_copyable_text_window.assert_called_once()
 
     def test_double_clicking_media_status_opens_popup_not_enabled_toggle(self):
         gui = GUI.AutoExportLauncherGUI.__new__(
@@ -942,7 +942,7 @@ class ProjectBrowserStateTest(unittest.TestCase):
             {"background": BG_SELECTION, "foreground": FG_SELECTED},
         )
 
-    def test_selected_folder_uses_selection_tag_before_folder_tag(self):
+    def test_selected_folder_swaps_base_tag_for_selected_variant(self):
         gui = GUI.AutoExportLauncherGUI.__new__(GUI.AutoExportLauncherGUI)
         gui.tree = MutableTreeStub()
         folder = gui.tree.insert("", "end", text="Project", tags=("folder_enabled",))
@@ -955,8 +955,11 @@ class ProjectBrowserStateTest(unittest.TestCase):
         gui.refresh_multi_selection_visuals()
 
         tags = gui.tree.item(folder, "tags")
-        self.assertEqual(tags[0], "multi")
-        self.assertIn("folder_enabled", tags)
+        self.assertEqual(tags, ("multi_folder",))
+
+        gui.multi_selection = set()
+        gui.refresh_multi_selection_visuals()
+        self.assertEqual(gui.tree.item(folder, "tags"), ("folder_enabled",))
 
     def test_option_menu_dropdown_hover_uses_inverse_text_color(self):
         option_menu = OptionMenuStub()

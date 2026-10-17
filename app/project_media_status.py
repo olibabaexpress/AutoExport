@@ -83,6 +83,60 @@ def build_project_media_status(results):
     }
 
 
+MISSING_AUDIO_LIST_NAME = "missing_audio_list.txt"
+
+
+def missing_audio_list_path():
+    return Path(data_file(MISSING_AUDIO_LIST_NAME))
+
+
+def format_project_missing_lines(project):
+    """Describe one project's missing samples with their stored paths."""
+    details = [
+        detail
+        for detail in project.get("missing_sample_details", ())
+        if isinstance(detail, dict)
+    ]
+    lines = []
+    seen = set()
+    for detail in details:
+        name = str(detail.get("name") or "")
+        stored = detail.get("stored_path") or "(no stored path)"
+        seen.add(name)
+        lines.append(f"  {name}\n      Path: {stored}")
+    for name in project.get("unresolved_sample_names", ()):
+        if name not in seen:
+            lines.append(f"  {name}\n      Path: (not recorded)")
+    return lines
+
+
+def format_missing_audio_list(projects):
+    """Build the plain-text missing audio list for all projects."""
+    blocks = []
+    for project in projects:
+        lines = format_project_missing_lines(project)
+        if project.get("media_status") != "Missing" or not lines:
+            continue
+        blocks.append(
+            f"{project.get('path', '')}\n" + "\n".join(lines)
+        )
+    header = (
+        f"Missing audio list - updated "
+        f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+        f"Projects with missing audio: {len(blocks)}\n"
+    )
+    return header + "\n" + "\n\n".join(blocks) + ("\n" if blocks else "")
+
+
+def write_missing_audio_list(projects, output_path=None):
+    target = Path(output_path or missing_audio_list_path())
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(
+        format_missing_audio_list(projects), encoding="utf-8"
+    )
+    return target
+
+
 def save_project_media_status(results, output_path=None, merge=False):
     """Atomically save media status, optionally retaining other projects."""
     target = Path(output_path or data_file("project_media_status.json"))
@@ -159,4 +213,12 @@ def save_project_media_status(results, output_path=None, merge=False):
         if temporary_path is not None:
             temporary_path.unlink(missing_ok=True)
         raise
+    try:
+        list_path = (
+            target.with_name(MISSING_AUDIO_LIST_NAME)
+            if output_path else None
+        )
+        write_missing_audio_list(payload["projects"], list_path)
+    except OSError:
+        pass
     return target

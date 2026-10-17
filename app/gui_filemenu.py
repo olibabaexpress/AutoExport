@@ -1,9 +1,14 @@
 """File, Edit, and Tools menu construction for the launcher GUI."""
 
+import os
 import tkinter as tk
+from tkinter import filedialog
+from tkinter import messagebox
 
 from CTkMenuBar import CTkMenuBar, CustomDropdownMenu
 import ableton_build
+
+from export_path_config import get_export_path, set_export_path
 from gui_keybindings import menu_label 
 from gui_theme import (
     ACCENT_ORANGE, BG_INPUT, BG_SEPARATOR, BG_TOOLBAR, FG_PRIMARY, FG_SELECTED,
@@ -11,6 +16,37 @@ from gui_theme import (
 
 
 class FileMenuMixin:
+    def set_export_path(self):
+        
+        
+        """Allow the user to choose the base export folder."""
+
+        current_path = get_export_path()
+
+        selected_folder = filedialog.askdirectory(
+            title="Select Export Folder",
+            initialdir=current_path if os.path.isdir(current_path) else None,
+            mustexist=True,
+        )
+
+        if not selected_folder:
+            return False
+
+        try:
+            set_export_path(selected_folder)
+
+            messagebox.showinfo(
+                "Export Folder",
+                f"Export folder set to:\n\n{selected_folder}"
+            )
+            return True
+
+        except Exception as e:
+            messagebox.showerror(
+                "Export Folder",
+                f"Could not save export folder:\n\n{e}"
+            )
+            return False
     def create_menu(self):
         """Create the themed File, Edit, and Tools menus."""
         self.menu_bar = CTkMenuBar(
@@ -235,3 +271,5 @@ class FileMenuMixin:
         ):
             return
         cascade.configure(fg_color="transparent", text_color=FG_PRIMARY)
+
+
