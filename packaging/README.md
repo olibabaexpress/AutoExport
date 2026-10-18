@@ -31,7 +31,7 @@ Use **Configure AutoExport** in the Start menu to rerun configuration. Cancellin
 leaves the application installed but unconfigured; first launch asks again.
 Silent installation copies files only; first interactive launch configures it.
 
-## Layout and updates
+## Layout
 
 `AutoExport.exe` is the windowed launcher; `AutoExportWorker.exe` is the background
 export worker. The worker opens its own console when an export starts: it shows
@@ -40,18 +40,6 @@ there cancels the export without closing the GUI window. Console output is mirro
 into `LOGS\Worker_*.log`, and the full DEBUG-level trace stays in `LOGS`. `_internal`
 contains Python, libraries, bundled vendor resources
 and third-party notices. `data`, `LOGS` and `debug` are created alongside the EXEs.
-Upgrades preserve them. Uninstall deletes AutoExport's `data`, `LOGS` and `debug`
-directories under its installation, then removes the empty installation folder.
-It does not delete exported audio, unrelated files placed in the install folder,
-external state redirected with `AUTOEXPORT_HOME`, or AbletonOSC from Live.
-`AUTOEXPORT_HOME` can override writable state, but never relocates
-bundled resources. Keep the entire installed directory together.
-
-Build output includes dependency license files, a package-version inventory,
-Python's license, Tesseract's documentation and AbletonOSC's license. Review all
-redistribution requirements (including Tesseract's native DLL dependencies)
-before public distribution. The installer is unsigned; Windows may display a
-SmartScreen warning until a release is signed.
 
 ## Verification
 
@@ -69,7 +57,3 @@ Render completion waits for stable, unlocked WAV output before post-processing.
 Renames use same-volume atomic file operations with bounded retries for Windows
 sharing violations, avoiding copy-then-delete duplicates while Live or an
 indexer still holds a render open.
-
-The app and first-run configuration share the dark charcoal/green GUI palette
-and the supplied icon. Inno's pages and artwork use the same palette; standard
-Windows wizard buttons, title bars and system dialogs retain native styling.
