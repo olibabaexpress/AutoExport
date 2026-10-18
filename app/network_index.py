@@ -22,7 +22,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-import app_config
+import app_config as app_config
 from paths import data_file
 
 logger = logging.getLogger("AutoExport")
@@ -238,7 +238,7 @@ def device_from_path(path):
 
 def import_index(source, device):
     """Copy `source` into data/ as this device's index and register it."""
-    import create_db_patch
+    import create_db_patch as create_db_patch
 
     source = Path(source)
     destination = index_file_for(device)
@@ -364,7 +364,7 @@ def load_network_db():
     Only files whose drive is reachable through a share are included, so every
     key can be opened directly. Returns {} when no device is reachable.
     """
-    import create_db_patch
+    import create_db_patch as create_db_patch
 
     merged = {}
     for device in active_devices():

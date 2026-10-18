@@ -42,7 +42,7 @@ from pywinauto import Desktop
 
 from popup_automation import _get_window_rect_via_win32
 from paths import DEBUG_DIR
-import system_deps
+import system_deps as system_deps
 
 system_deps.configure_tesseract()
 

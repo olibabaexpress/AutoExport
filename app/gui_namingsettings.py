@@ -2,7 +2,7 @@
 
 import tkinter as tk
 
-import naming_settings
+import naming_settings as naming_settings
 from gui_theme import (
     ACCENT_ORANGE,
     BG_PANEL,

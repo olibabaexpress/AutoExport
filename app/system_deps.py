@@ -21,7 +21,7 @@ import os
 import shutil
 import sys
 
-import app_config
+import app_config as app_config
 from paths import VENDOR_DIR
 
 logger = logging.getLogger("AutoExport")
@@ -68,8 +68,8 @@ def configure_tesseract():
 
 def check(skip_osc=False):
     """Return [(name, ok, detail)] for every external dependency."""
-    import ableton_build
-    import osc_installer
+    import ableton_build as ableton_build
+    import osc_installer as osc_installer
     results = []
 
     tess = configure_tesseract()
@@ -99,7 +99,7 @@ def check(skip_osc=False):
 
 def configure(ableton_exe=None, ableton_beta_exe=None, export_path=None, project_dirs=None, overwrite=False):
     """Write setup choices into config.json. Existing values are kept unless overwrite=True."""
-    import ableton_build
+    import ableton_build as ableton_build
     messages = []
     ableton = ableton_build.ensure_detected()
     values = {}

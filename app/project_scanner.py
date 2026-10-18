@@ -10,7 +10,7 @@ queued for export.
 import logging
 from pathlib import Path
 
-import app_config
+import app_config as app_config
 
 logger = logging.getLogger(__name__)
 

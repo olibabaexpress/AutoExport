@@ -9,7 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "app"))
 
 import win32con
 import win32file
-import rendered_files
+import rendered_files as rendered_files
 
 
 def sharing_error():

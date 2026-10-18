@@ -8,12 +8,12 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "app"))
 
-import ableton_build
-import app_config
-import installer_setup
-import osc_installer
-import runtime_launch
-import system_deps
+import ableton_build as ableton_build
+import app_config as app_config
+import installer_setup as installer_setup
+import osc_installer as osc_installer
+import runtime_launch as runtime_launch
+import system_deps as system_deps
 
 
 class RuntimeLaunchTest(unittest.TestCase):

@@ -10,7 +10,7 @@ data/config.json).
 
 import logging
 
-import app_config
+import app_config as app_config
 
 logger = logging.getLogger("AutoExport")
 

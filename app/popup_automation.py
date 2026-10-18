@@ -29,8 +29,8 @@ pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tessera
 from PIL import ImageChops
 from pywinauto import Application, Desktop
 
-import naming_settings
-import ableton_state
+import naming_settings as naming_settings
+import ableton_state as ableton_state
 from window_utils import (
     win_exists,
     _list_windows_by_class_win32,

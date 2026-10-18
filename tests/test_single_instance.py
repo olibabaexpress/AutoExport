@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "app"))
 
-import explorer_launch
+import explorer_launch as explorer_launch
 
 
 class SingleInstanceTest(unittest.TestCase):

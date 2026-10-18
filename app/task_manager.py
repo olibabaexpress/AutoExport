@@ -4,8 +4,8 @@ import os
 import logging
 from concurrent.futures import ThreadPoolExecutor
 
-import audio_settings
-import project_structure
+import audio_settings as audio_settings
+import project_structure as project_structure
 from gui_project_panel import ProjectFinder
 from paths import data_file
 

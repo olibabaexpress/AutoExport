@@ -10,8 +10,8 @@ from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "app"))
 
-import GUI
-import gui_session
+import GUI as GUI
+import gui_session as gui_session
 from gui_project_panel import _project_tree_column_width
 from gui_theme import (
     ACCENT_NEUTRAL,

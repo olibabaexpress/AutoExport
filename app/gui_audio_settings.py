@@ -4,7 +4,7 @@ import tkinter as tk
 from tkinter import messagebox
 
 import customtkinter as ctk
-import audio_settings
+import audio_settings as audio_settings
 from gui_theme import (
     BG_BUTTON, BG_INPUT, BG_SELECTION, BG_SEPARATOR, BG_WINDOW,
     FG_PRIMARY, FG_SELECTED, FONT_HEADER, FONT_UI,

@@ -3,7 +3,7 @@
 
 from gui_theme import enable_dark_title_bar, set_window_icon
 import tkinter as tk
-import gui_missingmedia_tools
+import gui_missingmedia_tools as gui_missingmedia_tools
 
 
 

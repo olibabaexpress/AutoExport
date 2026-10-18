@@ -41,7 +41,7 @@ from gui_theme import (
     make_icon_button,
     make_outline_button,
 )
-import network_index
+import network_index as network_index
 from gui_missingmedia_layout import (
     add_grid_button,
     build_footer,

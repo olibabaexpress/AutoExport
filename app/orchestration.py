@@ -60,11 +60,11 @@ import json
 import traceback  
 import cv2
 from pathlib import Path
-import ableton_build
-import ableton_state
-import system_deps
-import project_structure
-import naming_settings
+import ableton_build as ableton_build
+import ableton_state as ableton_state
+import system_deps as system_deps
+import project_structure as project_structure
+import naming_settings as naming_settings
 from ableton_readiness import AbletonReadinessMonitor, wait_for_ableton_ready
 from project_and_file_naming import sanitize_filename, get_project_modification_date, build_stems_folder_name
 from window_management import launch_ableton_from_menu, maximize_ableton_window, close_ableton_cleanly
@@ -82,7 +82,7 @@ from pylive_commands import disable_audio_effects, disable_main_effects
 from find_clusters import project_render_ranges
 from window_utils import wait_for_window, find_window, find_window_in_children, find_window_by_title_win32, win_exists, win_activate_ableton, win_activate, win_close, win_exists_by_class, win_close_by_class, _list_windows_by_class_win32
 from export_path_config import get_export_path
-import audio_settings
+import audio_settings as audio_settings
 # abletoolz-based missing media resolution (runs before Ableton is even launched)
 from sample_database import load_index as load_sample_db
 from missing_media_resolver import resolve_missing_media_bulk

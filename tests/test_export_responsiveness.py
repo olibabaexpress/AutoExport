@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "app"))
 
-import export_automation
+import export_automation as export_automation
 
 
 class ExportResponsivenessTest(unittest.TestCase):

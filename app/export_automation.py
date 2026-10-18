@@ -54,7 +54,7 @@ from popup_automation import (
     set_export_path_in_dialog,
 )
 from popup_automation import _find_dialog_by_ratio_progress_bar
-import ableton_state
+import ableton_state as ableton_state
 from organize_stems_by_group import StemsOrganizerByGroup
 from export_window_controls import (
     RENDER_TARGET_MASTER,

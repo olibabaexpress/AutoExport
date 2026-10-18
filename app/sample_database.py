@@ -16,9 +16,9 @@ import time
 from threading import Event
 from datetime import datetime
 from pathlib import Path
-import create_db_patch
+import create_db_patch as create_db_patch
 
-import app_config
+import app_config as app_config
 
 logger = logging.getLogger(__name__)
 
@@ -31,7 +31,7 @@ DB_PATH = Path(data_file("abletoolz_sample_db.json"))
 def _default_sample_dirs():
     dirs = []
     try:
-        import ableton_build
+        import ableton_build as ableton_build
         user_library = ableton_build.user_library_path()
         if user_library:
             dirs.append(user_library)

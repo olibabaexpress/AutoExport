@@ -9,7 +9,7 @@ import psutil
 from export_path_config import get_export_path
 from paths import data_file
 from runtime_launch import export_command, export_creationflags
-import ableton_build
+import ableton_build as ableton_build
 
 import logging
 

@@ -7,7 +7,7 @@ from abletoolz.live_set import AbletonSet
 from find_clusters import render_ranges, TICKS_PER_BEAT, TAIL_BARS
 import os
 from paths import data_file
-import audio_settings
+import audio_settings as audio_settings
 TASK_FILE = data_file("EXPORT_TASKS.json")
 logger = logging.getLogger(__name__)
 

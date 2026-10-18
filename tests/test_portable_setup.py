@@ -11,11 +11,11 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "app"))
 
-import ableton_build
-import app_config
-import osc_installer
+import ableton_build as ableton_build
+import app_config as app_config
+import osc_installer as osc_installer
 import project_and_file_naming as naming
-import system_deps
+import system_deps as system_deps
 
 
 class ProjectNamingTest(unittest.TestCase):

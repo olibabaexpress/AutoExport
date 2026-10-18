@@ -6,7 +6,7 @@ from tkinter import filedialog
 from tkinter import messagebox
 
 from CTkMenuBar import CTkMenuBar, CustomDropdownMenu
-import ableton_build
+import ableton_build as ableton_build
 
 from export_path_config import get_export_path, set_export_path
 from gui_keybindings import menu_label 

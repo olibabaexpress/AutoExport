@@ -14,8 +14,8 @@ from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "app"))
 
-import popup_automation
-import window_utils
+import popup_automation as popup_automation
+import window_utils as window_utils
 
 SAVE_DLG = "Save Live Set As:"
 AUDIO_DLG = "Save Audio File As:"
@@ -296,7 +296,7 @@ class FindWindowElementTest(unittest.TestCase):
 
 def _win_info(hwnd, title, class_name=None, width=400, height=200):
     """Ableton state window entry the way list_ableton_windows builds them."""
-    import ableton_state
+    import ableton_state as ableton_state
     return ableton_state.WindowInfo(
         hwnd=hwnd, pid=4321, title=title,
         class_name=class_name or ableton_state.STANDARD_DIALOG_CLASS,
@@ -315,7 +315,7 @@ class PluginMessageboxPopupTest(unittest.TestCase):
     """
 
     def setUp(self):
-        import ableton_state
+        import ableton_state as ableton_state
         popup_automation._reported_popup_hwnds.clear()
         self.ableton_state = ableton_state
 

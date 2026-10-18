@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-import app_config
+import app_config as app_config
 
 # Blank until chosen (GUI File > Set Export Path, or the installer).
 DEFAULT_EXPORT_PATH = ""

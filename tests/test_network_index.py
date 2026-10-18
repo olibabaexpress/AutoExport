@@ -9,8 +9,8 @@ from unittest import mock
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "app"))
 
 import missing_media_resolver as resolver
-import network_index
-import sample_database
+import network_index as network_index
+import sample_database as sample_database
 
 
 class FakeRef:
@@ -91,7 +91,7 @@ class NetworkIndexTest(unittest.TestCase):
             self.assertTrue(Path(str(target) + ".asd").exists())
 
     def test_find_all_projects_skips_dot_files(self):
-        import project_scanner
+        import project_scanner as project_scanner
 
         with tempfile.TemporaryDirectory() as tmp:
             (Path(tmp) / "real.als").write_bytes(b"")

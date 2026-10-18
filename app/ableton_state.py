@@ -28,7 +28,7 @@ from datetime import datetime
 import psutil
 import pyautogui
 
-import ableton_build
+import ableton_build as ableton_build
 from paths import LOG_DIR
 
 logger = logging.getLogger("AutoExport")

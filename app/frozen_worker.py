@@ -15,8 +15,8 @@ def self_test(output=None):
     from PIL import Image, ImageDraw, ImageFont
     from tkinterdnd2 import TkinterDnD
     import pytesseract
-    import GUI
-    import system_deps
+    import GUI as GUI
+    import system_deps as system_deps
     from paths import DATA_DIR, VENDOR_DIR
     root = TkinterDnD.Tk()
     root.withdraw()
@@ -34,7 +34,7 @@ def self_test(output=None):
         if pool.submit(pow, 2, 3).result(timeout=30) != 8:
             raise RuntimeError("Multiprocessing worker failed")
     # Tk drag-and-drop uses STA COM; import the console automation only after closing Tk.
-    import orchestration
+    import orchestration as orchestration
     result = {"frozen": bool(getattr(sys, "frozen", False)), "ocr": text,
               "tk": tkinter.TkVersion, "data_dir": DATA_DIR,
               "osc_bundled": (Path(VENDOR_DIR) / "AbletonOSC" / "__init__.py").is_file(),
@@ -115,10 +115,10 @@ def main():
             parser.error(f"Unexpected arguments: {remaining}")
         return self_test(args.output)
     if args.mode == "check":
-        import system_deps
+        import system_deps as system_deps
         return system_deps.main(["--check", *remaining])
     sys.argv = [sys.argv[0], *remaining]
-    import orchestration
+    import orchestration as orchestration
     try:
         return orchestration.main()
     except KeyboardInterrupt:

@@ -4,7 +4,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "app"))
 
-import size_estimator
+import size_estimator as size_estimator
 
 
 class RescaleEstimateTest(unittest.TestCase):

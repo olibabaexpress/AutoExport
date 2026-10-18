@@ -10,8 +10,8 @@ from concurrent.futures import (
     CancelledError,
     ProcessPoolExecutor,
 )
-import project_structure
-import size_estimator
+import project_structure as project_structure
+import size_estimator as size_estimator
 from paths import data_file
 from find_clusters import TAIL_BARS
 

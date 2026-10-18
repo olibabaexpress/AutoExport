@@ -32,14 +32,14 @@ ctk.set_appearance_mode(CTK_APPEARANCE_MODE)
 ctk.set_default_color_theme(CTK_COLOR_THEME)
 
 import threading
-import ableton_build
-import audio_settings
-import gui_missingmedia_tools
+import ableton_build as ableton_build
+import audio_settings as audio_settings
+import gui_missingmedia_tools as gui_missingmedia_tools
 from gui_project_panel import ProjectFinder, ProjectPanelMixin
 from gui_queue_panel import QueuePanelMixin
 from gui_filemenu import FileMenuMixin
 from gui_audio_settings import AudioSettingsPanelMixin
-import gui_namingsettings
+import gui_namingsettings as gui_namingsettings
 from gui_ableton_version import AbletonVersionMixin
 
 # ---------- GUI PROCESS LOGGING ----------

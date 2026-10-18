@@ -4,10 +4,10 @@ import os
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
-import ableton_build
-import app_config
-import osc_installer
-import system_deps
+import ableton_build as ableton_build
+import app_config as app_config
+import osc_installer as osc_installer
+import system_deps as system_deps
 from gui_theme import style_setup
 
 

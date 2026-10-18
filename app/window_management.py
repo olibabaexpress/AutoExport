@@ -26,8 +26,8 @@ from popup_automation import (
     handle_qubiq_popup,
     dismiss_plugin_messagebox_popups,
 )
-import ableton_build
-import ableton_state
+import ableton_build as ableton_build
+import ableton_state as ableton_state
 
 logger = logging.getLogger("AutoExport")
 

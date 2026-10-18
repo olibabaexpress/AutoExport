@@ -43,8 +43,8 @@ def main():
         parser.add_argument("--output", required=True)
         args = parser.parse_args()
         return self_test(args.output)
-    import app_config
-    import installer_setup
+    import app_config as app_config
+    import installer_setup as installer_setup
     if "--configure" in sys.argv[1:]:
         return installer_setup.main()
     if not app_config.get("installer_configured") and installer_setup.main() != 0:
@@ -53,7 +53,7 @@ def main():
     launch_paths = gather_launch_paths()
     if launch_paths is None:
         return 0
-    import GUI
+    import GUI as GUI
     GUI.main(launch_paths)
     return 0
 

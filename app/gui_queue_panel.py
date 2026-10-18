@@ -6,8 +6,8 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 
 import customtkinter as ctk
-import project_structure
-import size_estimator
+import project_structure as project_structure
+import size_estimator as size_estimator
 from gui_theme import (
     ACCENT_CYAN,
     ACCENT_NEUTRAL,

@@ -21,7 +21,7 @@ import os
 import shutil
 import sys
 
-import ableton_build
+import ableton_build as ableton_build
 from paths import VENDOR_DIR
 
 SCRIPT_NAME = "AbletonOSC"

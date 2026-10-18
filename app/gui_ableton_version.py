@@ -4,8 +4,8 @@ import tkinter as tk
 from tkinter import filedialog, messagebox
 import customtkinter as ctk
 
-import ableton_build
-import osc_installer
+import ableton_build as ableton_build
+import osc_installer as osc_installer
 
 from gui_theme import (
     BG_WINDOW,
@@ -279,7 +279,7 @@ class AbletonVersionMixin:
             user_library = os.path.normpath(user_library)
         ok, message = osc_installer.install(user_library)
         if ok:
-            import app_config
+            import app_config as app_config
             if not app_config.set("user_library_path", user_library):
                 messagebox.showerror(
                     "Could Not Save User Library",
