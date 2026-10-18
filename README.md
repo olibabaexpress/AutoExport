@@ -53,21 +53,21 @@ The GUI scans your project folders, lets you queue the sets you want, and then b
 
 ## Requirements
 
-  
 
-| Needed | Notes |
+**Windows 10/11 x64 **
+UI automation relies on Win32 
 
-|---|---|
+**Ableton Live 12 English UI**
 
-| Windows 10/11 x64 | UI automation relies on Win32 |
 
-| Ableton Live 12 | English UI; project plugins/samples must already be installed |
+**[AbletonOSC](https://github.com/ideoforms/AbletonOSC)**
+A patched copy is bundled in `vendor/AbletonOSC` and installed for you
 
-| [AbletonOSC](https://github.com/ideoforms/AbletonOSC) | A patched copy is bundled in `vendor/AbletonOSC` and installed for you |
+ **Tesseract OCR** 
+ Used to read Live's export dialogs; installed/detected by setup
 
-| Tesseract OCR | Used to read Live's export dialogs; installed/detected by setup |
-
-| Python 3.11–3.13 | Only when running from source |
+**Python 3.11–3.13** 
+Only when running from source
 
   
 
