@@ -54,7 +54,7 @@ The GUI scans your project folders, lets you queue the sets you want, and then b
 ## Requirements
 
 
-**Windows 10/11 x64 **
+**Windows 10/11 x64**
 UI automation relies on Win32 
 
 **Ableton Live 12 English UI**
