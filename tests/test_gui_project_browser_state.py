@@ -1236,6 +1236,7 @@ class ProjectBrowserStateTest(unittest.TestCase):
         gui._visible_file_items = Mock(return_value=["row-a", "row-b"])
         gui._set_project_selection = Mock()
         gui.start_selected_media_scan = Mock()
+        gui.open_bulk_fix_window = Mock()
         gui.root = object()
         menu = Mock()
         event = type(
@@ -1254,12 +1255,18 @@ class ProjectBrowserStateTest(unittest.TestCase):
         ]
         self.assertEqual(
             [option["label"] for option in command_options],
-            ["Scan & Relink (2 Items)", "Scan & Collect (2 Items)"],
+            [
+                "Scan & Relink (2 Items)",
+                "Scan & Collect (2 Items)",
+                "Bulk Fix Selected (2 Items)",
+            ],
         )
         command_options[0]["command"]()
         gui.start_selected_media_scan.assert_called_once_with(
             ("a.als", "b.als"), "relink"
         )
+        command_options[2]["command"]()
+        gui.open_bulk_fix_window.assert_called_once_with(("a.als", "b.als"))
 
     def test_initial_estimates_are_enqueued_in_small_batches(self):
         gui = GUI.AutoExportLauncherGUI.__new__(GUI.AutoExportLauncherGUI)

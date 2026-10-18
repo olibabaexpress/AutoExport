@@ -3,6 +3,7 @@
 import json
 import os
 import tempfile
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -47,6 +48,7 @@ def build_project_media_status(results):
             "missing_sample_details": result.get("missing_sample_details", []),
             "categories": [],
             "media_status": None,
+            "scanned_at": time.time(),
         }
 
         if project["success"]:
@@ -95,6 +97,77 @@ def build_project_media_status(results):
             confirmed_missing.values(), key=str.casefold
         ),
     }
+
+
+def load_resolved_project_paths(
+    paths, mode="collect", status_path=None, index_path=None,
+    include_missing=False,
+):
+    """
+    Return saved, still-applicable media results keyed by normalized project
+    path. Portable projects are always reusable; Linked projects are reusable
+    in relink and automation jobs, but reprocessed by GUI collect jobs.
+    Missing/Candidates are reusable only when `include_missing` is true and
+    the sample index has not changed.
+    """
+    if mode not in ("relink", "collect"):
+        raise ValueError(f"Unsupported missing-media mode: {mode!r}")
+    target = Path(status_path or data_file("project_media_status.json"))
+    if index_path is None:
+        from sample_database import DB_PATH
+
+        index_path = DB_PATH
+    try:
+        with target.open(encoding="utf-8") as status_file:
+            saved = json.load(status_file)
+        entries = saved.get("projects", [])
+    except (OSError, ValueError, AttributeError):
+        return {}
+
+    try:
+        index_mtime = os.path.getmtime(index_path)
+    except OSError:
+        index_mtime = None
+
+    def key(path):
+        return os.path.normcase(os.path.abspath(os.path.normpath(path)))
+
+    by_path = {
+        key(entry["path"]): entry
+        for entry in entries
+        if isinstance(entry, dict) and isinstance(entry.get("path"), str)
+    }
+    resolved = {}
+    for path in paths:
+        entry = by_path.get(key(path))
+        media_status = entry.get("media_status") if entry else None
+        if (
+            not entry
+            or not entry.get("success")
+            or not isinstance(entry.get("scanned_at"), (int, float))
+        ):
+            continue
+        try:
+            if os.path.getmtime(path) > entry["scanned_at"]:
+                continue
+        except OSError:
+            continue
+        if media_status == "Portable":
+            pass
+        elif media_status == "Linked" and (
+            mode == "relink" or include_missing
+        ):
+            pass
+        elif include_missing and media_status in ("Missing", "Candidates"):
+            if (
+                index_mtime is None
+                or index_mtime > entry["scanned_at"]
+            ):
+                continue
+        else:
+            continue
+        resolved[key(path)] = entry
+    return resolved
 
 
 MISSING_AUDIO_LIST_NAME = "missing_audio_list.txt"
@@ -230,6 +303,8 @@ def save_project_media_status(results, output_path=None, merge=False):
             key = os.path.normcase(
                 os.path.abspath(os.path.normpath(project["path"]))
             )
+            if not project["success"] and key in projects_by_path:
+                continue
             projects_by_path[key] = project
 
         projects = sorted(

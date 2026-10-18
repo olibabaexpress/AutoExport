@@ -78,7 +78,8 @@ IDLE_SETTLE_SECONDS = 4
 
 
 EXPORT_HUNG_TIMEOUT = 6
-
+class ExportUnresponsiveError(RuntimeError):
+    """Ableton stopped responding during an export and was terminated."""
 
 class _ExportResponsivenessMonitor:
     def __init__(self):
@@ -118,9 +119,15 @@ class _ExportResponsivenessMonitor:
             "killing Ableton and skipping this task",
             elapsed,
         )
-        if not ableton_state.kill_ableton():
+        killed = ableton_state.kill_ableton()
+        if not killed:
             logger.error("Could not kill unresponsive Ableton after export timeout")
-        return False
+        raise ExportUnresponsiveError(
+            f"Ableton became unresponsive during export and did not "
+            f"respond within {EXPORT_HUNG_TIMEOUT} seconds." 
+            f"unresponsive for {elapsed:.1f}s."
+            f"Termination {'succeeded' if killed else 'failed'}."
+        )
 
 
 def click_centre_and_zoom_out():

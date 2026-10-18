@@ -52,6 +52,8 @@ def find_all_projects(directories=None):
             logger.warning(f"Project directory not found, skipping: {root_dir}")
             continue
         for als_path in root_path.rglob("*.als"):
+            if als_path.name.startswith("."):
+                continue
             if any(part.lower() in SKIP_DIR_NAMES for part in als_path.parts):
                 continue
             found.add(str(als_path))

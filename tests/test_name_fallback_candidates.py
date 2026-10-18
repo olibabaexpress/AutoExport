@@ -76,6 +76,64 @@ class NameFallbackTest(unittest.TestCase):
             [],
         )
 
+    def test_stale_factory_ref_matches_renamed_library_sample(self):
+        project = self.root / "Project"
+        project.mkdir()
+        old = r"C:\ProgramData\Ableton\Live 10 Suite\Resources\Core Library\Samples\Grand Piano\GrandPiano-C1-ff.aif"
+        new = r"C:\ProgramData\Ableton\Live 12 Suite\Resources\Core Library\Samples\Multisamples\Grand Piano\GrandPiano C1 ff.aif"
+        ref = SimpleNamespace(
+            name="GrandPiano-C1-ff.aif", relative_exists=False, relative=None,
+            absolute=Path(old), live_pack=None, pack_resolved=False,
+            get_relative_type=lambda: 3,
+        )
+        fake_set = SimpleNamespace(
+            samples=SimpleNamespace(iterate=lambda: [ref]),
+            find_project_root_folder=lambda: project,
+        )
+        db = {new: {"name": "GrandPiano C1 ff.aif", "size": 1, "last_modified": 0}}
+        names = resolver._factory_names_for(db)
+        self.assertEqual(
+            resolver._collect_external_sample_details(
+                fake_set, project / "a.als", names
+            ),
+            [],
+        )
+        self.assertEqual(
+            len(resolver._collect_external_sample_details(fake_set, project / "a.als")),
+            1,
+        )
+
+    def test_unresolved_refs_are_not_listed_as_external(self):
+        project = self.root / "Project"
+        project.mkdir()
+        ref = SimpleNamespace(
+            name="gone.wav", relative_exists=False, absolute_exists=False,
+            relative=None, absolute=Path("E:/old/Project/gone.wav"),
+            live_pack=None, pack_resolved=False, get_relative_type=lambda: 3,
+        )
+        fake_set = SimpleNamespace(
+            samples=SimpleNamespace(iterate=lambda: [ref]),
+            find_project_root_folder=lambda: project,
+        )
+        self.assertEqual(
+            resolver._collect_external_sample_details(fake_set, project / "a.als"),
+            [],
+        )
+
+    def test_name_with_leading_space_matches_indexed_file(self):
+        real = self.write("proj/Consolidate/(Freeze) [2022-12-07 170455].wav", b"x" * 10)
+        ref = make_ref(size=10)
+        ref.name = " (Freeze) [2022-12-07 170455].wav"
+        index = resolver._build_name_index(
+            {str(real): {"name": real.name, "size": 10, "last_modified": 0}}
+        )
+        self.assertEqual(
+            [p for p, _ in resolver._get_size_verified_candidates(ref, index)],
+            [str(real)],
+        )
+        strict = resolver._size_verified_database({}, [ref], index)
+        self.assertEqual(strict[str(real)]["name"], ref.name)
+
     def test_single_candidate_is_chosen(self):
         only = self.write("one/kick.wav")
         chosen, _ = resolver._choose_name_candidate(

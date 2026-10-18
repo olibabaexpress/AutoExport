@@ -39,9 +39,17 @@ from gui_theme import (
     make_outline_button,
 )
 
+from gui_missingmedia_layout import (
+    add_grid_button,
+    build_footer,
+    build_section_header,
+    make_panel,
+)
 from missing_media_resolver import format_bulk_report, resolve_missing_media_bulk
+from network_index import load_network_db
 from project_scanner import find_all_projects, load_project_dirs, save_project_dirs
 from project_media_status import (
+    load_resolved_project_paths,
     missing_audio_list_path,
     save_project_media_status,
 )
@@ -83,28 +91,59 @@ def start_selected_media_scan(gui, project_paths, mode):
     def update_progress(message):
         gui.root.after(0, lambda text=message: show_progress(text))
 
-    def finish(results, error=None):
+    def finish(results, error=None, skipped_count=0):
         gui._selected_media_scan_active = False
         gui.resume_size_estimates_after_heavy_task()
         if error is not None:
             gui.end_status_job(f"{mode_label} failed: {error}")
+            return
+        if not results:
+            gui.end_status_job(
+                f"{mode_label}: skipped {skipped_count} already-resolved "
+                "project(s); nothing needed scanning."
+            )
             return
         gui.refresh_project_media_status()
         fixed = sum(result.get("fixed", 0) for result in results.values())
         missing = sum(
             result.get("missing_before", 0) for result in results.values()
         )
+        copied = sum(
+            len(result.get("network_names") or []) for result in results.values()
+        )
+        network_note = f" {copied} copied from the network." if copied else ""
+        skipped_note = (
+            f" Skipped {skipped_count} already-resolved project(s)."
+            if skipped_count else ""
+        )
         gui.end_status_job(
             f"{mode_label} complete: {fixed}/{missing} references fixed "
-            f"across {len(results)} project(s)."
+            f"across {len(results)} project(s).{network_note}{skipped_note}"
         )
 
     def worker():
         try:
             database = load_sample_index()
+            network_db = load_network_db()
+            reusable = load_resolved_project_paths(paths, mode=mode)
+            scan_paths = tuple(
+                path for path in paths
+                if os.path.normcase(os.path.abspath(os.path.normpath(path)))
+                not in reusable
+            )
+            skipped_count = len(paths) - len(scan_paths)
+            if not scan_paths:
+                gui.root.after(
+                    0,
+                    lambda count=skipped_count: finish(
+                        {}, skipped_count=count
+                    ),
+                )
+                return
             results = resolve_missing_media_bulk(
-                paths,
+                scan_paths,
                 database,
+                network_db=network_db,
                 progress_callback=update_progress,
                 mode=mode,
             )
@@ -115,7 +154,11 @@ def start_selected_media_scan(gui, project_paths, mode):
             )
             gui.root.after(0, lambda caught=error: finish({}, caught))
             return
-        gui.root.after(0, lambda completed=results: finish(completed))
+        gui.root.after(
+            0,
+            lambda completed=results, count=skipped_count:
+                finish(completed, skipped_count=count),
+        )
 
     threading.Thread(
         target=worker,
@@ -144,31 +187,15 @@ class IconToggle:
 
 def build_bulk_fix_contents(gui, parent):
     """Build project-folder controls and the missing-media scan/report UI."""
-    header_row = tk.Frame(parent, bg=BG_WINDOW)
-    header_row.pack(fill=tk.X, padx=5, pady=(10, 5))
-    tk.Label(
-        header_row,
-        text=(
-            "Project folders"
-        ),
-        bg=BG_WINDOW,
-        fg=FG_PRIMARY,
-        font=FONT_HEADER,
-        anchor="w",
-        justify="left",
-    ).pack(side=tk.LEFT)
-    header_add_holder = tk.Frame(header_row, bg=BG_WINDOW)
-    header_add_holder.pack(side=tk.LEFT, padx=(8, 0))
+    # Footer first: bottom-packed widgets must claim their space before the
+    # expanding panels are packed (see gui_missingmedia_layout).
+    footer = build_footer(parent)
+    progress_var = footer.status_var
+    scan_progress_bar = footer.progress_bar
+    scan_icon_slot = footer.icon_slot
 
-    list_frame = tk.Frame(
-        parent,
-        bg=BG_TREE,
-        bd=0,
-        highlightthickness=1,
-        highlightbackground=BG_SEPARATOR,
-        highlightcolor=BG_SEPARATOR,
-    )
-    list_frame.pack(fill=tk.X, padx=5, pady=5)
+    folder_actions = build_section_header(parent, "Project folders")
+    list_frame = make_panel(parent, expand=False)
 
     scrollbar = create_dark_scrollbar(list_frame, orientation="vertical")
     scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
@@ -187,16 +214,18 @@ def build_bulk_fix_contents(gui, parent):
         bd=0,
         highlightthickness=0,
         relief=tk.FLAT,
-        borderwidth=0,
-        highlightbackground=BG_TREE,
-        highlightcolor=BG_TREE,
     )
-    listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, anchor="nw")
+    listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
     scrollbar.configure(command=listbox.yview)
 
     def refresh_listbox():
         listbox.delete(0, tk.END)
-        for directory in load_project_dirs():
+        directories = list(load_project_dirs())
+        for project_path in getattr(gui, "_bulk_fix_selected_projects", ()):
+            folder = os.path.dirname(project_path)
+            if folder and folder not in directories:
+                directories.append(folder)
+        for directory in directories:
             listbox.insert(tk.END, directory)
 
     refresh_listbox()
@@ -235,63 +264,12 @@ def build_bulk_fix_contents(gui, parent):
     bind_directory_listbox_hotkeys(listbox, remove_selected)
 
     add_folder_button = make_icon_button(
-        header_add_holder, "add-folder", add_directory, size=20
+        folder_actions, "add-folder", add_directory, size=20
     )
-    add_folder_button.pack()
+    add_folder_button.pack(side=tk.LEFT)
     bind_directory_context_menu(
         gui.root, listbox, remove_selected, add_directory
     )
-
-    progress_var = tk.StringVar(value="Ready")
-
-    status_frame = tk.Frame(
-        parent,
-        bg=BG_PANEL,
-        highlightthickness=1,
-        highlightbackground=BG_SEPARATOR,
-        bd=0,
-    )
-    status_frame.pack(
-        fill=tk.X,
-        padx=(5, 20),
-        pady=(2, 8),
-    )
-
-
-    status_label = tk.Label(
-        status_frame,
-        textvariable=progress_var,
-        bg=BG_TREE,
-        fg=ACCENT_GREEN,
-        font=FONT_UI,
-        anchor="center",
-        justify="left",
-        wraplength=560,
-        padx=8,
-        pady=7,
-    )
-    status_label.pack(
-        side=tk.LEFT,
-        fill=tk.X,
-        expand=True,
-    )
-
-    progress_row = tk.Frame(parent, bg=BG_WINDOW)
-    progress_row.pack(fill=tk.X, padx=(5, 20), pady=(0, 8))
-    # Fixed-size slot so showing/hiding the icons never shifts the layout.
-    scan_icon_slot = tk.Frame(progress_row, bg=BG_WINDOW, width=64, height=30)
-    scan_icon_slot.pack(side=tk.RIGHT, padx=(6, 0))
-    scan_icon_slot.pack_propagate(False)
-    scan_icon_slot.grid_propagate(False)
-
-    scan_progress_bar = ttk.Progressbar(
-        progress_row,
-        mode="determinate",
-        maximum=1,
-        value=0,
-        style="MissingMedia.Horizontal.TProgressbar",
-    )
-    scan_progress_bar.pack(side=tk.LEFT, fill=tk.X, expand=True)
 
     def update_scan_progress_bar(*_args):
         message = progress_var.get()
@@ -304,14 +282,8 @@ def build_bulk_fix_contents(gui, parent):
 
     progress_var.trace_add("write", update_scan_progress_bar)
 
-    report_frame = tk.Frame(
-        parent,
-        bg=BG_TREE,
-        highlightthickness=0,
-        highlightbackground="#343A40",
-        highlightcolor=ACCENT_GREEN,
-        bd=0,
-    )
+    build_section_header(parent, "Scan report")
+    report_frame = make_panel(parent, expand=True)
     report_scroll = create_dark_scrollbar(
         report_frame, orientation="vertical"
     )
@@ -324,6 +296,11 @@ def build_bulk_fix_contents(gui, parent):
         font=("Consolas", 9),
         wrap="none",
         state=tk.DISABLED,
+        bd=0,
+        highlightthickness=0,
+        relief=tk.FLAT,
+        padx=6,
+        pady=4,
     )
     report_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
     report_scroll.configure(command=report_text.yview)
@@ -401,82 +378,30 @@ def build_bulk_fix_contents(gui, parent):
         report_text.config(state=tk.DISABLED)
 
 
-    bottom_row = tk.Frame(parent, bg=BG_WINDOW)
-    bottom_row.pack(
-        side=tk.BOTTOM,
-        fill=tk.X,
-        padx=5,
-        pady=(0, 10),
-    )
-    button_group = tk.Frame(bottom_row, bg=BG_WINDOW)
-    button_group.pack(fill=tk.X)
-    scan_row = tk.Frame(button_group, bg=BG_WINDOW)
-    scan_row.pack(anchor="w")
-    control_row = tk.Frame(button_group, bg=BG_WINDOW)
-    control_row.pack(fill=tk.X)
-    control_right = tk.Frame(control_row, bg=BG_WINDOW)
-    control_right.pack(side=tk.RIGHT)
-
-    # Equal-width slots prevent buttons resizing when their text changes.
-    BUTTON_WIDTH = 132
-    BUTTON_HEIGHT = 32
-    BUTTON_GAP = 6
-
-    def make_bottom_button(
-        text, command, color, container, state=tk.NORMAL
-    ):
-        slot = tk.Frame(
-            container,
-            bg=BG_WINDOW,
-            width=BUTTON_WIDTH,
-            height=BUTTON_HEIGHT,
-        )
-        slot.pack(side=tk.LEFT, padx=BUTTON_GAP // 2, pady=2)
-        slot.pack_propagate(False)
-
-        button = make_outline_button(
-            slot,
-            text,
-            command,
-            color,
-            font=FONT_UI,
-            padx=4,
-            pady=4,
-            state=state,
-        )
-        button.pack(fill=tk.BOTH, expand=True)
-
-        return button
+    def make_bottom_button(text, command, color, column):
+        return add_grid_button(footer.button_row, column, text, command, color)
 
     relink_button = make_bottom_button(
-        "Scan & Relink", None, BTN_COLOR_GO, scan_row
+        "Scan & Relink", None, BTN_COLOR_GO, 0
     )
-
     collect_button = make_bottom_button(
-        "Scan & Collect", None, BTN_COLOR_GO, scan_row
+        "Scan & Collect", None, BTN_COLOR_GO, 1
     )
-
     scan_button = make_bottom_button(
-        "Scan (Preview Only)", None, BTN_COLOR_MAIN, scan_row
+        "Preview Scan", None, BTN_COLOR_MAIN, 2
+    )
+    save_report_button = make_bottom_button(
+        "Save Report...", None, BTN_COLOR_NEUTRAL, 3
+    )
+    open_missing_list_button = make_bottom_button(
+        "Open Missing List", None, BTN_COLOR_NEUTRAL, 4
     )
 
     pause_button = IconToggle(
         make_icon_button(scan_icon_slot, "pause", lambda: None, size=22), 0
     )
-
     stop_button = IconToggle(
         make_icon_button(scan_icon_slot, "cancel", lambda: None, size=22), 1
-    )
-
-    save_report_button = make_bottom_button(
-        "Save Report...", None, BTN_COLOR_NEUTRAL, control_right
-    )
-
-    open_missing_list_button = make_bottom_button(
-        "Open Missing List",
-        None,
-        BTN_COLOR_NEUTRAL,
-        control_right,
     )
 
     scan_state = {
@@ -486,6 +411,11 @@ def build_bulk_fix_contents(gui, parent):
         "pause_requested": threading.Event(),
         "stop_requested": threading.Event(),
         "projects": None,
+        "selected_projects": tuple(
+            getattr(gui, "_bulk_fix_selected_projects", ())
+        ),
+        "skip_checked": False,
+        "skipped_count": 0,
         "next_index": 0,
         "results": {},
         "database": None,
@@ -495,6 +425,27 @@ def build_bulk_fix_contents(gui, parent):
         "live_log_handler": None,
     }
     last_report = {"text": ""}
+
+    def set_selected_projects(project_paths):
+        scan_state["selected_projects"] = tuple(dict.fromkeys(
+            os.path.normcase(os.path.abspath(os.fspath(path)))
+            for path in project_paths
+            if str(path).lower().endswith(".als")
+        ))
+        gui._bulk_fix_selected_projects = scan_state["selected_projects"]
+        refresh_listbox()
+        progress_var.set(
+            f"Loaded {len(scan_state['selected_projects'])} selected project(s)."
+        )
+
+    gui._set_bulk_fix_selected_projects = set_selected_projects
+    if scan_state["selected_projects"]:
+        set_selected_projects(scan_state["selected_projects"])
+
+    def release_size_priority():
+        if scan_state["priority_suspended"]:
+            gui.resume_size_estimates_after_heavy_task()
+            scan_state["priority_suspended"] = False
 
     def save_report():
         if not last_report["text"]:
@@ -540,13 +491,6 @@ def build_bulk_fix_contents(gui, parent):
 
     open_missing_list_button.config(command=open_missing_list)
 
-    report_frame.pack(
-        fill=tk.BOTH,
-        expand=True,
-        padx=5, pady=(5, 20)
-    )
-
-
     def append_live_report_line(message):
         report_text.config(state=tk.NORMAL)
         report_text.insert(tk.END, f"{message}\n")
@@ -580,17 +524,14 @@ def build_bulk_fix_contents(gui, parent):
             scan_state["live_log_handler"] = None
 
     def restore_buttons():
-        scan_button.config(state=tk.NORMAL, text="Scan (Preview Only)")
+        scan_button.config(state=tk.NORMAL, text="Preview Scan")
         relink_button.config(state=tk.NORMAL, text="Scan & Relink")
         collect_button.config(state=tk.NORMAL, text="Scan & Collect")
         save_report_button.config(state=tk.NORMAL)
         pause_button.config(state=tk.DISABLED, text="Pause")
         stop_button.config(state=tk.DISABLED, text="Stop")
-
-    def release_size_priority():
-        if scan_state["priority_suspended"]:
-            gui.resume_size_estimates_after_heavy_task()
-            scan_state["priority_suspended"] = False
+        footer.reset_progress()
+        release_size_priority()
 
     def finish_batch(batch_results, paused, stopped, status_path, status_error):
         remove_live_log_handler()
@@ -623,13 +564,12 @@ def build_bulk_fix_contents(gui, parent):
             scan_state["next_index"] = 0
             scan_state["results"] = {}
             scan_state["database"] = None
-            scan_state["database_loaded"] = False
-            release_size_priority()
+            scan_state["database_loaded"] = False; scan_state["network_db"] = None
+            # release_size_priority()
             restore_buttons()
             progress_var.set(
                 f"Stopped after {completed}/{project_count} projects. "
-                "Completed work is safe; the partial scan was not saved as "
-                "the latest project status."
+                "Completed work is safe and its project status was saved."
             )
             return
 
@@ -637,6 +577,7 @@ def build_bulk_fix_contents(gui, parent):
             scan_state["results"], dry_run=scan_state["dry_run"]
         )
         results = scan_state["results"].values()
+        results_list = list(results)
         missing_before = sum(result["missing_before"] for result in results)
         fixed = sum(result["fixed"] for result in results)
         still_missing = sum(result["missing_after"] for result in results)
@@ -650,8 +591,22 @@ def build_bulk_fix_contents(gui, parent):
             f"across {len(scan_state['results'])} project(s), "
             f"{still_missing} still missing."
         )
+        if scan_state["skipped_count"]:
+            progress_var.set(
+                f"{progress_var.get()} Skipped "
+                f"{scan_state['skipped_count']} already-resolved project(s)."
+            )
         last_report["text"] = report
         set_report_text(report)
+        network_copied = sum(
+            len(result.get("network_names") or []) for result in results_list
+        )
+        if network_copied:
+            progress_var.set(
+                f"{progress_var.get()} {network_copied} sample reference(s) "
+                "copied from the network."
+            )
+        gui.set_status(progress_var.get())
         if status_error is not None:
             progress_var.set(
                 f"{progress_var.get()} Project status could not be saved; "
@@ -665,7 +620,7 @@ def build_bulk_fix_contents(gui, parent):
             )
         scan_state["paused"] = False
         scan_state["pause_requested"].clear()
-        release_size_priority()
+        # release_size_priority()
         restore_buttons()
 
     def fail_scan(error):
@@ -674,7 +629,7 @@ def build_bulk_fix_contents(gui, parent):
         logger.error("Missing-media scan/fix failed: %s", message)
         scan_state["active"] = False
         scan_state["paused"] = False
-        release_size_priority()
+        # release_size_priority()
         progress_var.set(f"Error: {message} (full traceback in GUI log)")
         restore_buttons()
 
@@ -683,7 +638,7 @@ def build_bulk_fix_contents(gui, parent):
         scan_state["paused"] = False
         pause_button.config(state=tk.NORMAL, text="Pause")
         stop_button.config(state=tk.NORMAL, text="Stop")
-        scan_button.config(state=tk.DISABLED)
+        footer.set_progress_active(True)
         relink_button.config(state=tk.DISABLED)
         collect_button.config(state=tk.DISABLED)
         save_report_button.config(state=tk.DISABLED)
@@ -695,7 +650,11 @@ def build_bulk_fix_contents(gui, parent):
                     gui.suspend_size_estimates_for_heavy_task()
 
                 if scan_state["projects"] is None:
-                    scan_state["projects"] = find_all_projects()
+                    scan_state["projects"] = (
+                        list(scan_state["selected_projects"])
+                        if scan_state["selected_projects"]
+                        else find_all_projects()
+                    )
                 projects = scan_state["projects"]
                 if not projects:
                     def on_no_projects():
@@ -704,7 +663,7 @@ def build_bulk_fix_contents(gui, parent):
                         progress_var.set(
                             "No .als files found in the configured project folders."
                         )
-                        release_size_priority()
+                        # release_size_priority()
                         restore_buttons()
 
                     parent.after(0, on_no_projects)
@@ -713,15 +672,52 @@ def build_bulk_fix_contents(gui, parent):
                 if not scan_state["database_loaded"]:
                     scan_state["database"] = load_sample_index()
                     scan_state["database_loaded"] = True
+                    scan_state["network_db"] = load_network_db()
+                if not scan_state["skip_checked"]:
+                    skip_mode = (
+                        scan_state["mode"]
+                        if not scan_state["dry_run"]
+                        else "relink"
+                    )
+                    reusable = load_resolved_project_paths(
+                        projects, mode=skip_mode
+                    )
+                    scan_state["skipped_count"] = len(reusable)
+                    scan_state["projects"] = [
+                        project for project in projects
+                        if os.path.normcase(
+                            os.path.abspath(os.path.normpath(project))
+                        ) not in reusable
+                    ]
+                    scan_state["skip_checked"] = True
+                    projects = scan_state["projects"]
+                    if not projects:
+                        def on_all_skipped():
+                            remove_live_log_handler()
+                            scan_state["active"] = False
+                            footer.reset_progress()
+                            progress_var.set(
+                                f"Skipped {scan_state['skipped_count']} "
+                                "already-resolved project(s); nothing needed "
+                                "scanning."
+                            )
+                            restore_buttons()
+
+                        parent.after(0, on_all_skipped)
+                        return
                 if scan_state["database"] is None:
                     on_progress(
-                        f"Found {len(projects)} project(s). No sample index "
+                        f"Found {len(projects)} project(s); skipped "
+                        f"{scan_state['skipped_count']} already resolved. "
+                        "No sample index "
                         "built yet - missing media will only be reported, "
                         "not fixed. Build one in the Sample Index window first."
                     )
                 else:
                     on_progress(
-                        f"Found {len(projects)} project(s). Checking each "
+                        f"Found {len(projects)} project(s); skipped "
+                        f"{scan_state['skipped_count']} already resolved. "
+                        "Checking each "
                         "against the sample index..."
                     )
 
@@ -737,6 +733,7 @@ def build_bulk_fix_contents(gui, parent):
                     progress_offset=start_index,
                     total_count=len(projects),
                     mode=scan_state["mode"],
+                    network_db=scan_state.get("network_db"),
                 )
                 paused = len(batch_results) < len(remaining)
                 stopped = (
@@ -745,11 +742,13 @@ def build_bulk_fix_contents(gui, parent):
                 )
                 status_path = None
                 status_error = None
-                if not paused and not stopped and not scan_state["dry_run"]:
+                if not scan_state["dry_run"]:
                     complete_results = dict(scan_state["results"])
                     complete_results.update(batch_results)
                     try:
-                        status_path = save_project_media_status(complete_results)
+                        status_path = save_project_media_status(
+                            complete_results, merge=True
+                        )
                     except OSError as error:
                         logger.exception(
                             "Could not save project media status snapshot"
@@ -817,12 +816,12 @@ def build_bulk_fix_contents(gui, parent):
         scan_state["next_index"] = 0
         scan_state["results"] = {}
         scan_state["database"] = None
-        scan_state["database_loaded"] = False
-        release_size_priority()
+        scan_state["database_loaded"] = False; scan_state["network_db"] = None
+        # release_size_priority()
         restore_buttons()
         progress_var.set(
             f"Stopped after {completed}/{project_count} projects. "
-            "The partial scan was not saved as the latest project status."
+            "Completed work is safe and its project status was saved."
         )
 
     def run(dry_run, mode="collect"):
@@ -831,13 +830,18 @@ def build_bulk_fix_contents(gui, parent):
             "active": False,
             "paused": False,
             "priority_suspended": False,
-            "projects": None,
+            "projects": (
+                list(scan_state["selected_projects"])
+                if scan_state["selected_projects"] else None
+            ),
             "next_index": 0,
             "results": {},
             "database": None,
             "database_loaded": False,
             "dry_run": dry_run,
             "mode": mode,
+            "skip_checked": False,
+            "skipped_count": 0,
         })
         scan_state["pause_requested"].clear()
         scan_state["stop_requested"].clear()

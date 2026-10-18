@@ -17,6 +17,7 @@ class StatusMixin:
     def _create_status_bar(self):
         self.status_bar = tk.Frame(self.root, bg=BG_TOOLBAR, height=20)
         self.status_bar.pack(side="bottom", fill="x")
+        self.status_bar.pack_propagate(False)
         self._status_message = "Ready"
         self._status_tooltip_visible = False
         self._status_job_active = False
@@ -35,7 +36,8 @@ class StatusMixin:
             bg=BG_TOOLBAR,
             fg=FG_PRIMARY,
         )
-        self.status_label.pack(side="left", padx=5)
+        self.status_label.pack(side="left", fill="x", expand=True, padx=5)
+        self.status_label.config(anchor="w")
 
     def set_status(self, message):
         self._status_message = str(message)
@@ -51,9 +53,7 @@ class StatusMixin:
         self.set_status(message)
         if self.status_progress is None:
             return
-        self.status_progress.pack(
-            side="left", padx=(8, 0), before=self.status_label
-        )
+        self.status_progress.pack(side="right", padx=(8, 6))
         if indeterminate:
             self.status_progress.configure(mode="indeterminate")
             self.status_progress.start()

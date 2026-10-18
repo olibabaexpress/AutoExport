@@ -76,7 +76,7 @@ from popup_automation import (
 from export_automation import (
     collect_all_and_save, export_stems, export_main,
     prepare_main_wet_dry, close_export_window_if_open,
-    WET_FOLDER, DRY_FOLDER, DRY_SUFFIX,
+    WET_FOLDER, DRY_FOLDER, DRY_SUFFIX, ExportUnresponsiveError,
 )
 from pylive_commands import disable_audio_effects, disable_main_effects
 from find_clusters import project_render_ranges
@@ -86,6 +86,7 @@ import audio_settings
 # abletoolz-based missing media resolution (runs before Ableton is even launched)
 from sample_database import load_index as load_sample_db
 from missing_media_resolver import resolve_missing_media_bulk
+from project_media_status import load_resolved_project_paths
 
 
 
@@ -848,9 +849,14 @@ def _handle_failure(on_failure, label, consecutive_failures):
             f"{consecutive_failures} failures in a row (last: {label}) - something is "
             "wrong beyond a single project, stopping."
         )
-    logger.warning(f"{label} - recovering: force-closing Ableton, next task starts from a fresh launch")
-    if not ableton_state.kill_ableton():
-        raise RunAborted("Could not kill Ableton during recovery")
+    logger.warning(f"{label} - recovering: force-closing Ableton, next task starts from a fresh launch"
+    "next task starts from a fresh launch"
+    )
+    if ableton_state.is_running():
+        if not ableton_state.kill_ableton():
+            if not ableton_state.is_running():
+                raise RunAborted("Could not kill Ableton during recovery")
+
 
 
 def main_processing_loop(tasks, project_groups, ableton_version, task_file, on_failure, abletoolz_results=None):
@@ -923,6 +929,8 @@ def main_processing_loop(tasks, project_groups, ableton_version, task_file, on_f
         except Exception as e:
             if isinstance(e, ProjectStepError):
                 step, detail = e.step, e.detail
+            elif isinstance(e, ExportUnresponsiveError):
+                step, detail = "export_unresponsive", str(e)
             else:
                 step, detail = "unexpected_error", f"{type(e).__name__}: {e}"
                 logger.error(traceback.format_exc())
@@ -1072,7 +1080,39 @@ def _run(task_file, on_failure):
                 for task in tasks
                 if task.get("project_path", "").strip() and not task.get("done", False)
             ]
-            abletoolz_results = resolve_missing_media_bulk(pending_paths, sample_db, progress_callback=logger.info)
+            already_resolved = load_resolved_project_paths(
+                pending_paths, include_missing=True
+            )
+            to_scan = [
+                path for path in pending_paths
+                if os.path.normcase(os.path.abspath(os.path.normpath(path)))
+                not in already_resolved
+            ]
+            if already_resolved:
+                logger.info(
+                    f"Skipping abletoolz pre-pass for {len(already_resolved)} project(s) "
+                    "with saved media results that are still current."
+                )
+            abletoolz_results = resolve_missing_media_bulk(to_scan, sample_db, progress_callback=logger.info)
+            for path in pending_paths:
+                saved = already_resolved.get(
+                    os.path.normcase(os.path.abspath(os.path.normpath(path)))
+                )
+                if saved is not None:
+                    abletoolz_results[path] = {
+                        "success": True,
+                        "error": None,
+                        "missing_before": saved.get("missing_before", 0),
+                        "missing_after": saved.get("missing_after", 0),
+                        "fixed": saved.get("fixed", 0),
+                        "still_missing_names": saved.get(
+                            "unresolved_sample_names", []
+                        ),
+                        "external_sample_refs": saved.get(
+                            "external_sample_refs", 0
+                        ),
+                        "skipped_known_status": saved.get("media_status"),
+                    }
     except Exception as e:
         logger.warning(f"Abletoolz pre-pass failed, continuing without missing-media resolution: {e}")
 

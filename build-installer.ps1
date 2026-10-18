@@ -13,7 +13,7 @@ param(
     [string]$TesseractDir,
     [string]$InnoCompiler = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
     [ValidatePattern('^\d+\.\d+\.\d+$')]
-    [string]$Version = "0.1.8"
+    [string]$Version = "0.1.9"
 )
 $ErrorActionPreference = "Stop"
 $Root = $PSScriptRoot

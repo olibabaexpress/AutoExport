@@ -142,7 +142,7 @@ class ProjectFinder:
             ]
             als_files = [
                 filename for filename in filenames
-                if filename.endswith(".als") and not filename.startswith("._")
+                if filename.endswith(".als") and not filename.startswith(".")
             ]
             if als_files:
                 projects_by_folder[dirpath] = {
@@ -469,21 +469,51 @@ class ProjectPanelMixin:
         self.project_search_query = self.project_search_entry.get().strip()
         self.update_tree(persist=False)
 
-    def select_missing_media(self):
-        """Select visible project rows reported as missing by the latest scan."""
+    def _select_media_status(self, labels):
+        """Select only the visible project rows whose media status is in labels."""
         self._load_project_media_status()
         visible_files = set(self._visible_file_items())
         self.multi_selection = {
             self.path_to_tree_item[path]
             for path in self.path_to_tree_item
             if self.path_to_tree_item[path] in visible_files
-            and self._project_media_status_label(path)
-            in UNRESOLVED_MEDIA_LABELS
+            and self._project_media_status_label(path) in labels
         }
         self.last_selected_item = next(iter(self.multi_selection), None)
         self.project_selection_anchor = self.last_selected_item
         self.refresh_multi_selection_visuals()
         return "break"
+
+    def _enable_only_media_status(self, labels):
+        """Enable only loaded projects whose media status is in labels."""
+        self._load_project_media_status()
+        for project_info in self.projects_by_folder.values():
+            for f in project_info.get("files", []):
+                cfg = self.selected_projects.get(f) or self._default_project_config(f)
+                cfg["enabled"] = self._project_media_status_label(f) in labels
+                self.selected_projects[f] = cfg
+        self.update_tree()
+        return "break"
+
+    def select_only_linked(self):
+        return self._select_media_status(("Linked",))
+
+    def select_only_portable(self):
+        return self._select_media_status(("Portable",))
+
+    def select_only_missing(self):
+        return self._select_media_status(UNRESOLVED_MEDIA_LABELS)
+
+    select_missing_media = select_only_missing
+
+    def enable_only_linked(self):
+        return self._enable_only_media_status(("Linked",))
+
+    def enable_only_portable(self):
+        return self._enable_only_media_status(("Portable",))
+
+    def enable_only_missing(self):
+        return self._enable_only_media_status(UNRESOLVED_MEDIA_LABELS)
 
     def disable_missing_media(self):
         """Disable all loaded projects reported as missing by the latest scan."""
@@ -565,6 +595,12 @@ class ProjectPanelMixin:
             command=lambda paths=project_paths:
                 self.start_selected_media_scan(paths, "collect"),
         )
+        menu.add_separator()
+        menu.add_command(
+            label=f"Bulk Fix Selected ({count} Items)",
+            command=lambda paths=project_paths:
+                self.open_bulk_fix_window(paths),
+        )
 
         def show_menu_tooltip(event):
             index = menu.index(f"@{event.y}")
@@ -581,6 +617,12 @@ class ProjectPanelMixin:
                 self.show_status_tooltip(
                     "What's External?: Lists this project's known "
                     "external samples."
+                )
+                return
+            if label.startswith("Bulk Fix Selected"):
+                self.show_status_tooltip(
+                    "Bulk Fix Selected: Opens Bulk Fix with only the selected "
+                    "projects loaded for the next scan."
                 )
                 return
             mode = "relink" if "Relink" in label else "collect"

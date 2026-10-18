@@ -349,13 +349,19 @@ class AutoExportLauncherGUI(
         for file_path in files:
             self.add_path(file_path)
     
-    def open_bulk_fix_window(self):
+    def open_bulk_fix_window(self, selected_projects=None):
          """Open Missing Media on its Bulk Fix tab."""
-         self.open_missing_media_window("bulk_fix")
+         self.open_missing_media_window(
+             "bulk_fix", selected_projects=selected_projects
+         )
 
-    def open_missing_media_window(self, selected_tab="sample_index"):
+    def open_missing_media_window(
+        self, selected_tab="sample_index", selected_projects=None
+    ):
          """Show the Sample Index and Bulk Fix tools in one tabbed window."""
-         gui_missingmedia_tools.open_missing_media_window(self, selected_tab)
+         gui_missingmedia_tools.open_missing_media_window(
+             self, selected_tab, selected_projects=selected_projects
+         )
 
     def start_selected_media_scan(self, project_paths, mode):
          """Scan and fix selected projects asynchronously from the browser."""

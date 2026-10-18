@@ -778,10 +778,11 @@ def detect_specify_window(threshold=0.75):
     logger.debug(f"[SPECIFY_CHECK] No specify window found (checked {windows_checked} windows)")
     return _store_ocr("specify", False)
 
+
 def fuzzy_phrase_in_text(text, phrase, threshold=0.8):
     """
     Check whether a phrase appears anywhere within OCR text,
-    allowing for OCR errors.
+    allowing for OCR errors and incomplete text.
     """
     text = re.sub(r"\s+", " ", text.lower()).strip()
     phrase = re.sub(r"\s+", " ", phrase.lower()).strip()
@@ -790,28 +791,31 @@ def fuzzy_phrase_in_text(text, phrase, threshold=0.8):
     if phrase in text:
         return True, 1.0
 
+    # Compare the complete OCR text against the phrase.
+    # This handles OCR output that omits words or merges words.
+    best_similarity = difflib.SequenceMatcher(
+        None, text, phrase
+    ).ratio()
+
     phrase_words = phrase.split()
     text_words = text.split()
 
-    if len(text_words) < len(phrase_words):
-        return False, 0.0
+    # If OCR returned fewer words than the phrase, the full-text
+    # comparison above is still valid; don't return zero.
+    if len(text_words) >= len(phrase_words):
+        for i in range(len(text_words) - len(phrase_words) + 1):
+            candidate = " ".join(
+                text_words[i:i + len(phrase_words)]
+            )
 
-    best_similarity = 0.0
+            similarity = difflib.SequenceMatcher(
+                None, candidate, phrase
+            ).ratio()
 
-    for i in range(len(text_words) - len(phrase_words) + 1):
-        candidate = " ".join(
-            text_words[i:i + len(phrase_words)]
-        )
-
-        similarity = difflib.SequenceMatcher(
-            None,
-            candidate,
-            phrase
-        ).ratio()
-
-        best_similarity = max(best_similarity, similarity)
+            best_similarity = max(best_similarity, similarity)
 
     return best_similarity >= threshold, best_similarity
+
 
 
 

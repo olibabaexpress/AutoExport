@@ -74,6 +74,37 @@ def remove_sample_dir(path):
     return dirs
 
 
+def automatic_sample_dirs():
+    """Folders always indexed: everything under %APPDATA%\\Ableton (all Live
+    versions' preferences, including Live Recordings temp projects)."""
+    import os
+
+    appdata = os.environ.get("APPDATA")
+    if not appdata:
+        return []
+    roaming = Path(appdata) / "Ableton"
+    return [str(roaming)] if roaming.is_dir() else []
+
+
+def _with_automatic_dirs(directories):
+    import os
+
+    def norm(path):
+        return os.path.normcase(os.path.abspath(str(path)))
+
+    combined = list(directories)
+    covered = [norm(path) for path in combined]
+    for extra in automatic_sample_dirs():
+        target = norm(extra)
+        if not any(
+            target == root or target.startswith(root.rstrip("\\") + "\\")
+            for root in covered
+        ):
+            combined.append(extra)
+            covered.append(target)
+    return combined
+
+
 def build_or_update_index(
     directories=None,
     progress_callback=None,
@@ -97,6 +128,7 @@ def build_or_update_index(
     """
     if directories is None:
         directories = load_sample_dirs()
+    directories = _with_automatic_dirs(directories)
 
     started = time.monotonic()
     logger.info(

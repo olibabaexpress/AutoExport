@@ -37,8 +37,16 @@ from gui_theme import (
     FONT_UI_BOLD,
     create_dark_scrollbar,
     bind_directory_context_menu,
+    load_icon,
     make_icon_button,
     make_outline_button,
+)
+import network_index
+from gui_missingmedia_layout import (
+    add_grid_button,
+    build_footer,
+    build_section_header,
+    make_panel,
 )
 from create_db_patch import IndexCancelled
 from sample_database import (
@@ -100,64 +108,27 @@ def build_sample_index_contents(gui, parent):
             if not listbox.winfo_exists():
                 return
             index_coverage["directories"] = indexed
-            status_var.set(status_text)
+            if not index_control["running"]:
+                progress_var.set(status_text)
             refresh_listbox()
 
 
 
         parent.after(0, update_coverage)
-    # index_coverage = {"directories": set()}
-    # Status label for displaying the current state of the sample index.
-    status_var = tk.StringVar(value="Index: checking...")
-    tk.Label(
-        parent,
-        textvariable=status_var,
-        bg=BG_WINDOW,
-        fg=FG_PRIMARY,
-        font=FONT_UI_BOLD,
-        anchor="w",
-        padx=4,
-        pady=10,
-    ).pack(fill=tk.X, padx=6, pady=4,)
 
+        
+    # Footer first so the expanding list panel can't push it off-screen.
+    footer = build_footer(parent)
+    progress_var = footer.status_var
+    progress_var.set("Index: checking...")
+    progress_bar = footer.progress_bar
+    icon_slot = footer.icon_slot
 
-
-    footer = tk.Frame(parent, bg=BG_WINDOW)
-    footer.pack(side=tk.BOTTOM, fill=tk.X)
-
-    folders_frame = tk.Frame(
-        parent,
-        bg=BG_WINDOW,
-        bd=1,
-        relief=tk.GROOVE,
-        padx=5,
-        pady=5,
+    network_state = {"devices": []}
+    directory_actions = build_section_header(
+        parent, "Directories to Scan & Index"
     )
-    folders_frame.pack(
-        fill=tk.BOTH,
-        expand=True,
-        padx=5,
-        pady=(2, 5),
-    )
-    directories_header = tk.Frame(folders_frame, bg=BG_WINDOW)
-    directories_header.pack(fill=tk.X, padx=2, pady=(0, 5))
-
-    tk.Label(
-        directories_header,
-        text="Directories to Scan & Index",
-        bg=BG_WINDOW,
-        fg=FG_SECONDARY,
-        font=FONT_HEADER,
-        anchor="w",
-        padx=4,
-        pady=4,
-    ).pack(side=tk.LEFT)
-
-    directory_actions = tk.Frame(directories_header, bg=BG_WINDOW)
-    directory_actions.pack(side=tk.LEFT, padx=(6, 0))
-
-    list_frame = tk.Frame(folders_frame, bg=BG_WINDOW)
-    list_frame.pack(fill=tk.BOTH, expand=True)
+    list_frame = make_panel(parent, expand=True)
     scrollbar = create_dark_scrollbar(list_frame, orientation="vertical")
     scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
 
@@ -171,6 +142,9 @@ def build_sample_index_contents(gui, parent):
         selectmode=tk.EXTENDED,
         font=FONT_UI,
         activestyle="none",
+        bd=0,
+        highlightthickness=0,
+        relief=tk.FLAT,
     )
     listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
     scrollbar.configure(command=listbox.yview)
@@ -201,6 +175,10 @@ def build_sample_index_contents(gui, parent):
                 color = ACCENT_GREEN
             listbox.insert(tk.END, label)
             listbox.itemconfig(index, foreground=color)
+        for device in network_state["devices"]:
+            for directory in network_index.device_directories(device):
+                listbox.insert(tk.END, f"●  {device}  ·  {directory}")
+                listbox.itemconfig(tk.END, foreground=ACCENT_CYAN)
 
     refresh_listbox()
 
@@ -246,94 +224,113 @@ def build_sample_index_contents(gui, parent):
     )
     add_folder_button.pack(side=tk.LEFT)
 
+    network_button = make_icon_button(
+        directory_actions, "network_inactive", lambda: browse_network_index(),
+        size=20,
+    )
+    network_button.pack(side=tk.LEFT, padx=(6, 0))
+    network_images = {
+        name: load_icon(name, 20)
+        for name in ("network_active", "network_inactive")
+    }
+
+    def apply_network_state(devices, message=None):  # devices pre-probed off-thread
+        if not listbox.winfo_exists():
+            return
+        network_state["devices"] = devices
+        icon = network_images["network_active" if devices else "network_inactive"]
+        if icon is not None:
+            network_button.config(image=icon)
+            network_button.image = icon
+        if message and not index_control["running"]:
+            progress_var.set(message)
+        refresh_listbox()
+
+    def run_in_background(work, finish):
+        def runner():
+            try:
+                outcome = work()
+            except Exception as error:
+                logger.exception("Network index task failed")
+                outcome = error
+            try:
+                parent.after(0, lambda: finish(outcome))
+            except (RuntimeError, tk.TclError):
+                pass
+
+        threading.Thread(target=runner, daemon=True).start()
+
+    def browse_network_index():
+        path = filedialog.askopenfilename(
+            title="Select a networked AutoExport sample index (abletoolz_sample_db.json)",
+            filetypes=[("Sample index", "*.json"), ("All files", "*.*")],
+        )
+        if not path:
+            return
+        device = (
+            network_index.device_from_path(path)
+            or network_index.mapped_drive_server(path)
+        )
+        if not device:
+            apply_network_state(
+                network_state["devices"],
+                f"Could not tell which computer that index belongs to"
+                f"\n- browse to it through the network path",
+            )
+            return
+        device = device.strip().upper()
+
+        def finish(outcome):
+            if isinstance(outcome, Exception):
+                apply_network_state(
+                    network_state["devices"],
+                    f"Could not import the index from {device}: {outcome}",
+                )
+                return
+            apply_network_state(
+                outcome[1], f"Networked Index imported from {device}"
+            )
+
+        run_in_background(
+            lambda: (network_index.import_index(path, device), network_index.active_devices()),
+            finish,
+        )
+
+    def finish_auto_connect(outcome):
+        if isinstance(outcome, Exception):
+            return
+        if outcome["state"] == "imported":
+            apply_network_state(outcome["active"], outcome["message"])
+        else:
+            prompt = ""
+            if outcome["state"] == "needs_browse":
+                prompt = (
+                    f"{outcome['device']} is on the network but no sample "
+                    "index was found - click the network icon to browse for one"
+                )
+            apply_network_state(outcome["active"], prompt)
+
+    def auto_connect_work():
+        result = network_index.auto_connect()
+        result["active"] = network_index.active_devices()
+        return result
+
+    run_in_background(auto_connect_work, finish_auto_connect)
+
     bind_directory_listbox_hotkeys(listbox, remove_selected)
     bind_directory_context_menu(
         gui.root, listbox, remove_selected, add_directory
     )
 
-    button_row = tk.Frame(footer, bg=BG_WINDOW)
-    button_row.pack(fill=tk.X, padx=5, pady=(0, 10))
-
-
-
-
-    # Configure the progress bar
-    progress_style = ttk.Style(gui.root)
-    progress_style.configure(
-        "MissingMedia.Horizontal.TProgressbar",
-        background=ACCENT_CYAN,
-        troughcolor=BG_WINDOW,
-        bordercolor=BG_WINDOW,
-        lightcolor=ACCENT_CYAN,
-        darkcolor=ACCENT_CYAN,
-    )
-    progress_style.configure(
-        "Inactive.Horizontal.TProgressbar",
-        background=BG_WINDOW,
-        troughcolor=BG_WINDOW,
-        bordercolor=BG_WINDOW,
-        lightcolor=BG_WINDOW,
-        darkcolor=BG_WINDOW,
-    )
-    # Single horizontal row: progress display on the left, buttons on the right.
-    control_row = tk.Frame(footer, bg=BG_WINDOW)
-    control_row.pack(fill=tk.X, padx=5, pady=(3, 5))
-
-    progress_var = tk.StringVar(value="")
-    # Fixed-size slot so showing/hiding the icons never shifts the layout.
-    icon_slot = tk.Frame(control_row, bg=BG_WINDOW, width=64, height=30)
-    icon_slot.pack(side=tk.RIGHT, padx=(0, 4))
-    icon_slot.pack_propagate(False)
-
-    progress_frame = tk.Frame(control_row, bg=BG_WINDOW)
-    progress_frame.pack(
-        side=tk.LEFT,
-        fill=tk.X,
-        expand=True,
-        padx=(0, 12),
-    )
-
-    # Progress text
-    tk.Label(
-        progress_frame,
-        textvariable=progress_var,
-        bg=BG_WINDOW,
-        fg=ACCENT_GREEN,
-        font=FONT_UI,
-        anchor="w",
-        wraplength=650,
-        justify="left",
-    ).pack(fill=tk.X, padx=5, pady=(2, 5))
-
-    # progress bar
-    progress_bar = ttk.Progressbar(
-        progress_frame,
-        mode="determinate",
-        maximum=1,
-        value=0,
-        style="Inactive.Horizontal.TProgressbar",
-        # variable=progress_var,
-    )
-    progress_bar.pack(fill=tk.X, padx=5, pady=(0, 2))
-    progress_bar.pack_propagate(False)
-
-
-    # Buttons
-    button_frame = tk.Frame(button_row, bg=BG_WINDOW)
-    button_frame.pack(side=tk.RIGHT, anchor="e")
-
-    build_button = make_outline_button(
-        button_frame,
+    build_button = add_grid_button(
+        footer.button_row,
+        0,
         "Build / Update Index",
         None,
         BTN_COLOR_GO,
+        columnspan=2,
         font=FONT_UI_BOLD,
-        padx=10,
-        pady=4,
-        width=18,
-        height=1,
     )
-    build_button.pack(side=tk.LEFT, padx=(0, 5), pady=(4, 4))
 
     pause_button = make_icon_button(icon_slot, "pause", lambda: None, size=22)
     cancel_button = make_icon_button(icon_slot, "cancel", lambda: None, size=22)
@@ -341,7 +338,7 @@ def build_sample_index_contents(gui, parent):
     def show_index_controls(visible):
         if visible:
             pause_button.pack(side=tk.LEFT, padx=(0, 2))
-            cancel_button.pack(side=tk.LEFT)
+            cancel_button.pack(side=tk.LEFT, padx=(2, 0))
         else:
             pause_button.pack_forget()
             cancel_button.pack_forget()
@@ -403,7 +400,7 @@ def build_sample_index_contents(gui, parent):
         build_button.config(state=tk.DISABLED, text="Scanning...")
         show_index_controls(True)
         progress_var.set("Starting scan...")
-        progress_bar.config(style="MissingMedia.Horizontal.TProgressbar")
+        footer.set_progress_active(True)
         def worker():
             try:
                 index_control["estimates_suspended"] = True
@@ -423,9 +420,7 @@ def build_sample_index_contents(gui, parent):
                     )
 
                     
-                    status_var.set(
-                        f"Index: {count} files, last updated just now"
-                    )
+                    footer.reset_progress()
                     build_button.config(
                         state=tk.NORMAL,
                         text="Build / Update Index",
@@ -440,7 +435,7 @@ def build_sample_index_contents(gui, parent):
                     index_control["running"] = False
                     index_control["resume_event"].set()
                     index_control["cancel_event"].clear()
-                    progress_bar.config(value=0)
+                    footer.reset_progress()
                     progress_var.set(
                         "Cancelled. The last saved index was kept."
                     )
@@ -461,7 +456,7 @@ def build_sample_index_contents(gui, parent):
                 def on_error():
                     index_control["running"] = False
                     index_control["resume_event"].set()
-                    progress_bar.stop()
+                    footer.reset_progress()
                     
                     progress_var.set(
                         f"Error: {message} (full traceback in GUI log)"

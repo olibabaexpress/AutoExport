@@ -97,9 +97,7 @@ def dummy_load_sample_index():
     return None
 
 
-def dummy_build_or_update_index(
-    progress_callback=None, pause_event=None, cancel_event=None
-):
+def dummy_build_or_update_index(progress_callback=None, pause_event=None):
     """Pretend to build an index and emit progress callbacks."""
     log_command("DUMMY: Build / Update Index requested")
     stages = [

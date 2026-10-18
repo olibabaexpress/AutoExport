@@ -147,7 +147,8 @@ class BulkActionsMixin:
         targets = self._target_projects()
         if not targets:
             return
-        new_state = not all(c.get("enabled", True) for c in targets)
+        # Mixed selections (and folders with mixed children) switch off first.
+        new_state = not any(c.get("enabled", True) for c in targets)
         for cfg in targets:
             cfg["enabled"] = new_state
         self._after_bulk_change()
@@ -166,7 +167,11 @@ class BulkActionsMixin:
 
     def clear_selected(self, event=None):
         """Remove the currently selected projects from the list entirely."""
-        paths = set(self._selected_project_paths())
+        self._remove_project_paths(set(self._selected_project_paths()))
+        return "break"
+
+    def _remove_project_paths(self, paths):
+        paths = set(paths)
         for p in paths:
             self.selected_projects.pop(p, None)
         # Drop removed files from projects_by_folder; clean up empty folders
@@ -179,6 +184,29 @@ class BulkActionsMixin:
         self.last_selected_item = None
         self.project_selection_anchor = None
         self.update_tree()
+
+    def remove_unselected(self, event=None):
+        """Remove every project that is not currently selected."""
+        keep = set(self._selected_project_paths())
+        if not keep:
+            return "break"
+        loaded = [
+            f for info in self.projects_by_folder.values()
+            for f in info.get("files", [])
+        ]
+        self._remove_project_paths({f for f in loaded if f not in keep})
+        return "break"
+
+    def remove_disabled(self, event=None):
+        """Remove every project that is currently disabled."""
+        loaded = [
+            f for info in self.projects_by_folder.values()
+            for f in info.get("files", [])
+        ]
+        self._remove_project_paths({
+            f for f in loaded
+            if not self.selected_projects.get(f, {}).get("enabled", True)
+        })
         return "break"
 
     def toggle_select_all(self):

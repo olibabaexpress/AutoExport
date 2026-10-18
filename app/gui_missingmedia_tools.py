@@ -73,10 +73,18 @@ class _FixedTabView:
         self.frame_buttons[frame].configure(bg=BG_SELECTED, fg=FG_SELECTED)
 
 
-def open_missing_media_window(gui, selected_tab="sample_index"):
+def open_missing_media_window(
+    gui, selected_tab="sample_index", selected_projects=None
+):
     """Show the Sample Index and Bulk Fix tools in one tabbed window."""
     existing = gui._get_existing_tool_window("missing_media")
     if existing:
+        if selected_projects:
+            set_projects = getattr(
+                gui, "_set_bulk_fix_selected_projects", None
+            )
+            if set_projects is not None:
+                set_projects(selected_projects)
         tab = getattr(gui, "_missing_media_tabs", {}).get(selected_tab)
         if tab is not None:
             gui._missing_media_notebook.select(tab)
@@ -100,6 +108,8 @@ def open_missing_media_window(gui, selected_tab="sample_index"):
         "sample_index": sample_tab,
         "bulk_fix": bulk_tab,
     }
+    if selected_projects:
+        gui._bulk_fix_selected_projects = tuple(selected_projects)
     build_sample_index_contents(gui, sample_tab)
     build_bulk_fix_contents(gui, bulk_tab)
     tabs.select(gui._missing_media_tabs.get(selected_tab, sample_tab))

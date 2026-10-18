@@ -18,6 +18,7 @@ import logging
 import os
 import shutil
 from collections import Counter
+from functools import lru_cache
 from pathlib import Path
 
 from abletoolz.live_set.document import AbletonSet
@@ -59,12 +60,16 @@ def _is_live_pack_ref(ref):
 
 
 def _filter_pack_refs(refs):
-    """Split refs into (genuinely_missing, live_pack_resolved)."""
+    """Split refs into (genuinely_missing, Live-resolved library/Pack refs)."""
     missing = []
-    pack = []
+    resolved = []
     for ref in refs:
-        (pack if _is_live_pack_ref(ref) else missing).append(ref)
-    return missing, pack
+        (
+            resolved
+            if _is_live_pack_ref(ref) or _is_versioned_factory_ref(ref)
+            else missing
+        ).append(ref)
+    return missing, resolved
 
 
 def _exclude_pack_refs_from_fix(ableton_set):
@@ -163,15 +168,115 @@ def _is_library_ref(ref):
         return False
 
 
-def _collect_external_sample_details(ableton_set, project_path):
+@lru_cache(maxsize=512)
+def _is_versioned_factory_path(stored):
+    """
+    Whether a stale path into one Live install exists in another installed
+    Live version at the same Resources factory-sample path.
+    """
+    if not stored:
+        return False
+    path = Path(stored)
+    parts = path.parts
+    live_index = next(
+        (
+            index for index in range(len(parts) - 1, -1, -1)
+            if parts[index].casefold().startswith("live ")
+        ),
+        None,
+    )
+    if live_index is None or live_index + 1 >= len(parts):
+        return False
+    relative_parts = parts[live_index + 1:]
+    relative_key = tuple(part.casefold() for part in relative_parts)
+    if not any(
+        marker in "\\".join(relative_key)
+        for marker in (
+            "resources\\builtin\\samples\\",
+            "resources\\core library\\samples\\",
+        )
+    ):
+        return False
+
+    live_root = Path(*parts[:live_index + 1])
+    try:
+        for sibling in live_root.parent.iterdir():
+            if (
+                sibling.is_dir()
+                and sibling != live_root
+                and sibling.name.casefold().startswith("live ")
+                and (sibling / Path(*relative_parts)).is_file()
+            ):
+                return True
+    except OSError:
+        return False
+    return False
+
+
+def _is_versioned_factory_ref(ref):
+    return _is_versioned_factory_path(
+        str(getattr(ref, "absolute", "") or "")
+    )
+
+
+_FACTORY_PATH_MARKERS = ("core library", "factory pack", "\\ableton\\", "/ableton/")
+_factory_cache = {"db": None, "names": frozenset()}
+
+
+def _normalize_sample_name(name):
+    """Name key ignoring case and the -, _, space differences between Live versions."""
+    return "".join(ch for ch in str(name).casefold() if ch.isalnum())
+
+
+def _factory_names_for(db):
+    """Normalized names of indexed samples that live in Ableton library locations."""
+    if not db:
+        return frozenset()
+    if _factory_cache["db"] is db:
+        return _factory_cache["names"]
+    names = set()
+    for sample_path, info in db.items():
+        lowered = str(sample_path).casefold()
+        if any(marker in lowered for marker in _FACTORY_PATH_MARKERS):
+            names.add(_normalize_sample_name(info.get("name") or Path(sample_path).name))
+    _factory_cache["db"] = db
+    _factory_cache["names"] = frozenset(names)
+    return _factory_cache["names"]
+
+
+def _is_factory_library_ref(ref, factory_names):
+    """Whether Live can resolve this ref from an installed Ableton library/pack."""
+    if _is_versioned_factory_ref(ref):
+        return True
+    if not factory_names:
+        return False
+    if _normalize_sample_name(ref.name) not in factory_names:
+        return False
+    if _is_live_pack_ref(ref):
+        return True
+    stored = str(getattr(ref, "absolute", "") or "").casefold()
+    return any(marker in stored for marker in _FACTORY_PATH_MARKERS)
+
+
+def _collect_external_sample_details(ableton_set, project_path, factory_names=None):
     """Return {name, path} entries for samples outside the project."""
     project_root = ableton_set.find_project_root_folder() or Path(project_path).parent
     details = []
     for ref in ableton_set.samples.iterate():
-        if _is_library_ref(ref):
+        if (
+            _is_library_ref(ref)
+            or _is_factory_library_ref(ref, factory_names)
+        ):
             continue
         if _is_live_pack_ref(ref):
             details.append({"name": ref.name, "path": str(ref.absolute or "")})
+            continue
+
+        # Unresolved refs are reported as missing, not as linked externals.
+        if (
+            getattr(ref, "absolute_exists", True) is False
+            and getattr(ref, "relative_exists", True) is False
+        ):
             continue
 
         if getattr(ref, "relative_exists", False) and ref.relative is not None:
@@ -186,12 +291,19 @@ def _collect_external_sample_details(ableton_set, project_path):
     return details
 
 
-def _collect_external_sample_names(ableton_set, project_path):
+def _collect_external_sample_names(ableton_set, project_path, factory_names=None):
     """Collect sample names whose usable or stored location is outside the project."""
     return [
         detail["name"]
-        for detail in _collect_external_sample_details(ableton_set, project_path)
+        for detail in _collect_external_sample_details(
+            ableton_set, project_path, factory_names
+        )
     ]
+
+
+def _name_key(name):
+    """Lookup key tolerant of stray leading/trailing spaces (Live freeze names)."""
+    return str(name).strip()
 
 
 def _build_name_index(db):
@@ -203,14 +315,14 @@ def _build_name_index(db):
     for smp_path, smp_info in db.items():
         name = smp_info.get("name")
         if isinstance(name, str):
-            index.setdefault(name, []).append((smp_path, smp_info))
+            index.setdefault(_name_key(name), []).append((smp_path, smp_info))
     return index
 
 
 def _get_size_verified_candidates(ref, name_index):
     """Return indexed files whose filename and actual size match a reference."""
     candidates = []
-    for smp_path, smp_info in name_index.get(ref.name, []):
+    for smp_path, smp_info in name_index.get(_name_key(ref.name), []):
         if ref.size is None or ref.size <= 0 or smp_info.get("size") != ref.size:
             continue
         source_path = Path(smp_path)
@@ -275,6 +387,21 @@ def _closeness_to_project(candidate, project_dir):
     return (-shared, len(str(candidate)), str(candidate).casefold())
 
 
+def _size_nearly_matches(ref, size):
+    """
+    Whether an indexed size is close enough to the size Live recorded.
+
+    Live's stored size can differ from the file on disk by a small amount
+    (e.g. a WAV re-saved with a different metadata chunk) while the audio is
+    unchanged, so a unique same-name file within this tolerance is accepted.
+    """
+    if not isinstance(size, int) or _size_unknown(ref):
+        return False
+    if ref.size < 65536:
+        return False
+    return abs(size - ref.size) <= max(4096, int(ref.size * 0.001))
+
+
 def _choose_name_candidate(ref, name_index, project_dir):
     """
     Pick an indexed file for a reference whose original size is unknown.
@@ -286,7 +413,11 @@ def _choose_name_candidate(ref, name_index, project_dir):
     choice is left to the user (chosen is None).
     """
     existing = []
-    for smp_path, _info in name_index.get(ref.name, []):
+    for smp_path, _info in name_index.get(_name_key(ref.name), []):
+        if not _size_unknown(ref) and not _size_nearly_matches(
+            ref, _info.get("size")
+        ):
+            continue
         try:
             if os.path.isfile(smp_path):
                 existing.append(smp_path)
@@ -322,7 +453,9 @@ def _plan_name_fallbacks(refs, name_index, project_dir):
     plan = {}
     cache = {}
     for ref in refs:
-        if not _size_unknown(ref):
+        if not _size_unknown(ref) and _get_size_verified_candidates(
+            ref, name_index
+        ):
             continue
         key = (ref.name, str(ref.absolute))
         if key not in cache:
@@ -353,7 +486,7 @@ def _apply_name_fallbacks(refs, plan, project_root, mode):
             if not target.exists() or _same_file_content(target, source):
                 target.parent.mkdir(parents=True, exist_ok=True)
                 if not target.exists():
-                    shutil.copy(source, target)
+                    _copy_sample_with_asd(source, target)
                 ref.set_relative(f"{rel_path}/{target.name}")
                 ref.set_relative_type(3)
                 changed += 1
@@ -371,7 +504,7 @@ def _unresolved_sample_details(
     details = []
     name_choices = {}
     for ref in refs:
-        indexed = name_index.get(ref.name, []) if index_available else []
+        indexed = name_index.get(_name_key(ref.name), []) if index_available else []
         valid = _get_size_verified_candidates(ref, name_index) if index_available else []
         candidate_paths = []
         if not index_available:
@@ -428,7 +561,7 @@ def _size_verified_database(db, refs, name_index):
     }
     strict_db = {}
     for name, size in verified_sizes:
-        for path, info in name_index.get(name, []):
+        for path, info in name_index.get(_name_key(name), []):
             if info.get("size") != size:
                 continue
             source_path = Path(path)
@@ -438,6 +571,8 @@ def _size_verified_database(db, refs, name_index):
             except OSError:
                 continue
             strict_info = dict(info)
+            # abletoolz matches on the reference's exact name.
+            strict_info["name"] = name
             strict_info["last_modified"] = None
             strict_db[path] = strict_info
     return strict_db
@@ -520,6 +655,18 @@ def _simulate_fix(
     return collected_names, linked_names, still_missing_names, still_missing_refs, linked_refs
 
 
+def _copy_sample_with_asd(source, target):
+    """Copy a sample plus its Ableton analysis file (.asd) when one sits beside it."""
+    shutil.copy(source, target)
+    source_asd = Path(str(source) + ".asd")
+    target_asd = Path(str(target) + ".asd")
+    try:
+        if source_asd.is_file() and not target_asd.exists():
+            shutil.copy(source_asd, target_asd)
+    except OSError as error:
+        logger.debug(f"Could not copy {source_asd}: {error}")
+
+
 def _collect_external_refs(ableton_set, project_root):
     """Copy existing external samples into the project and point refs at them."""
     changed = 0
@@ -547,7 +694,7 @@ def _collect_external_refs(ableton_set, project_root):
                 continue
             if not target.exists():
                 target.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy(source, target)
+                _copy_sample_with_asd(source, target)
             ref.set_relative(f"Samples/Imported/{target.name}")
             ref.set_relative_type(3)
             changed += 1
@@ -556,14 +703,135 @@ def _collect_external_refs(ableton_set, project_root):
     return changed
 
 
+def _choose_network_candidate(ref, network_name_index, project_dir):
+    """Pick a networked file for a missing ref, or (None, candidates)."""
+    if _size_unknown(ref):
+        return _choose_name_candidate(ref, network_name_index, project_dir)
+    verified = [
+        path for path, _info in _get_size_verified_candidates(ref, network_name_index)
+    ]
+    if not verified:
+        return None, []
+    best = max(verified, key=lambda p: _expected_path_similarity(ref.absolute, p))
+    return best, verified
+
+
+def _copy_network_sample(ref, source, project_root):
+    """Copy a networked sample into Samples/Imported and point the ref at it."""
+    source = Path(source)
+    target = project_root / "Samples" / "Imported" / source.name
+    try:
+        if target.exists() and not _same_file_content(target, source):
+            logger.warning(
+                f"Not copying {source}: a different {source.name} "
+                "already exists in Samples/Imported."
+            )
+            return False
+        if not target.exists():
+            target.parent.mkdir(parents=True, exist_ok=True)
+            _copy_sample_with_asd(source, target)
+        ref.set_relative(f"Samples/Imported/{target.name}")
+        ref.set_relative_type(3)
+        return True
+    except OSError as error:
+        logger.warning(f"Could not copy {source} from the network: {error}")
+        return False
+
+
+def _apply_network_pass(
+    result, project_path, db, name_index, network_name_index, dry_run
+):
+    """Copy samples that are only on another computer into the project."""
+    wanted = Counter(result.get('still_missing_names', []))
+    if not wanted:
+        return
+    als_path = Path(project_path)
+    fresh = AbletonSet(als_path)
+    if not fresh.parse():
+        return
+    project_root = Path(fresh.find_project_root_folder() or als_path.parent)
+    refs, _ = _filter_pack_refs(fresh.samples.check())
+    pending = []
+    for ref in refs:
+        if wanted.get(ref.name, 0) > 0:
+            wanted[ref.name] -= 1
+            pending.append(ref)
+
+    plan = {}
+    for ref in pending:
+        chosen, _candidates = _choose_network_candidate(
+            ref, network_name_index, project_root
+        )
+        if chosen:
+            plan[id(ref)] = chosen
+    if not plan:
+        return
+
+    if dry_run:
+        copied = [ref for ref in pending if id(ref) in plan]
+        unresolved = [ref for ref in pending if id(ref) not in plan]
+    else:
+        copied = [
+            ref for ref in pending
+            if id(ref) in plan and _copy_network_sample(ref, plan[id(ref)], project_root)
+        ]
+        if not copied:
+            return
+        fresh.save_set()
+        verify = AbletonSet(als_path)
+        if not verify.parse():
+            return
+        verify.find_project_root_folder()
+        unresolved, _ = _filter_pack_refs(verify.samples.check())
+        factory_names = _factory_names_for(db)
+        result['external_sample_names'] = sorted(
+            _collect_external_sample_names(verify, als_path, factory_names)
+        )
+        result['external_sample_refs'] = len(result['external_sample_names'])
+        result['external_sample_details'] = _collect_external_sample_details(
+            verify, als_path, factory_names
+        )
+        result['saved'] = True
+
+    network_names = sorted(ref.name for ref in copied)
+    after_names = sorted(ref.name for ref in unresolved)
+    result['network_names'] = network_names
+    result['network_copied'] = len(network_names)
+    result['missing_after'] = len(after_names)
+    result['fixed'] = result['missing_before'] - result['missing_after']
+    result['fixed_names'] = sorted(result['fixed_names'] + network_names)
+    result['still_missing_names'] = after_names
+    result['missing_roots'] = _collect_missing_roots(unresolved)
+    result['missing_sample_details'] = _unresolved_sample_details(
+        unresolved, name_index or {}, project_dir=als_path.parent
+    )
+    result['would_save'] = True
+    logger.info(
+        f"[network] {als_path.name}: {'would copy' if dry_run else 'copied'} "
+        f"{len(network_names)} sample(s) from the network into the project."
+    )
+
+
 def resolve_missing_media(
-    project_path, db, dry_run=False, name_index=None, mode="collect"
+    project_path, db, dry_run=False, name_index=None, mode="collect",
+    network_name_index=None,
 ):
     """Resolve missing samples; in collect mode also gather linked externals."""
     result = _resolve_missing_media_core(
         project_path, db, dry_run=dry_run, name_index=name_index, mode=mode
     )
     result.setdefault('collected_external', 0)
+    result.setdefault('network_names', [])
+    result.setdefault('network_copied', 0)
+    if network_name_index and result.get('success'):
+        try:
+            _apply_network_pass(
+                result, project_path, db,
+                name_index or (_build_name_index(db) if db else {}),
+                network_name_index, dry_run,
+            )
+        except Exception as error:
+            logger.error(f"Network sample pass failed for {project_path}: {error}")
     if mode != "collect" or dry_run or not result.get('success'):
         return result
     try:
@@ -584,10 +852,10 @@ def resolve_missing_media(
         if verify.parse():
             verify.find_project_root_folder()
             result['external_sample_names'] = sorted(
-                _collect_external_sample_names(verify, als_path)
+                _collect_external_sample_names(verify, als_path, _factory_names_for(db))
             )
             result['external_sample_refs'] = len(result['external_sample_names'])
-            result['external_sample_details'] = _collect_external_sample_details(verify, als_path)
+            result['external_sample_details'] = _collect_external_sample_details(verify, als_path, _factory_names_for(db))
         logger.info(
             f"[abletoolz] {als_path.name}: collected {changed} external sample "
             "reference(s) into Samples/Imported."
@@ -678,10 +946,10 @@ def _resolve_missing_media_core(
         name_index = _build_name_index(db) if db is not None else {}
         analysis_set = ableton_set
         result['external_sample_names'] = sorted(
-            _collect_external_sample_names(ableton_set, als_path)
+            _collect_external_sample_names(ableton_set, als_path, _factory_names_for(db))
         )
         result['external_sample_refs'] = len(result['external_sample_names'])
-        result['external_sample_details'] = _collect_external_sample_details(ableton_set, als_path)
+        result['external_sample_details'] = _collect_external_sample_details(ableton_set, als_path, _factory_names_for(db))
 
         missing_before_refs, pack_refs = _filter_pack_refs(ableton_set.samples.check())
         result['pack_skipped'] = len(pack_refs)
@@ -875,10 +1143,10 @@ def _resolve_missing_media_core(
         result['linked_names'] = linked_names
         result['still_missing_names'] = still_missing_names
         result['external_sample_names'] = sorted(
-            _collect_external_sample_names(analysis_set, als_path)
+            _collect_external_sample_names(analysis_set, als_path, _factory_names_for(db))
         )
         result['external_sample_refs'] = len(result['external_sample_names'])
-        result['external_sample_details'] = _collect_external_sample_details(analysis_set, als_path)
+        result['external_sample_details'] = _collect_external_sample_details(analysis_set, als_path, _factory_names_for(db))
 
         if result['would_save'] and not dry_run:
             logger.info(
@@ -914,6 +1182,7 @@ def resolve_missing_media_bulk(
     total_count=None,
     stop_requested=None,
     mode="collect",
+    network_db=None,
 ):
     """
     Run resolve_missing_media() over a batch of .als files up front, before any
@@ -934,6 +1203,8 @@ def resolve_missing_media_bulk(
         total_count: Total project count across pause/resume invocations.
         mode: "relink" to update references to indexed files without copying,
             or "collect" to copy indexed media into the project.
+        network_db: Optional {unc_path: info} from network_index.load_network_db().
+            Samples found only there are always copied into the project.
 
     Returns:
         dict mapping project_path -> result dict (see resolve_missing_media()).
@@ -951,6 +1222,12 @@ def resolve_missing_media_bulk(
         progress_callback("DRY RUN mode - no files will be modified.")
 
     name_index = _build_name_index(db) if db is not None else None
+    network_name_index = _build_name_index(network_db) if network_db else None
+    if network_name_index and progress_callback:
+        progress_callback(
+            f"Network index loaded ({len(network_db)} reachable files): samples "
+            "found only on the network will be copied into projects."
+        )
 
     for i, project_path in enumerate(project_paths, 1):
         if stop_requested is not None and stop_requested.is_set():
@@ -966,7 +1243,7 @@ def resolve_missing_media_bulk(
             )
         result = resolve_missing_media(
             project_path, db, dry_run=dry_run, name_index=name_index,
-            mode=mode,
+            mode=mode, network_name_index=network_name_index,
         )
         results[project_path] = result
 
@@ -1073,11 +1350,21 @@ def format_bulk_report(results, dry_run=False, mode=None):
             f"  (of which {total_linked} {word} linked by absolute path, not collected, because a "
             "same-name file with a different size already exists in that project's Samples/Imported)"
         )
+    network_refs = sum(len(r.get('network_names') or []) for r in results.values())
+    if network_refs:
+        network_files = {
+            name for r in results.values() for name in (r.get('network_names') or [])
+        }
+        verb = "would be copied" if dry_run else "copied"
+        lines.append(
+            f"Copied from network:     {network_refs} reference(s), "
+            f"{len(network_files)} unique file(s) {verb} into projects"
+        )
     lines.append(f"Still missing:           {total_still_missing}  ({unique_still_missing} unique file(s))")
     if total_pack_skipped:
         lines.append(
-            f"Live Pack references:    {total_pack_skipped} ignored (Live resolves these from an "
-            "installed Pack, not from the stored path)"
+            f"Live factory/Pack refs:  {total_pack_skipped} ignored (Live "
+            "resolves these from an installed library or Pack)"
         )
     lines.append("=" * 70)
     lines.append("")
@@ -1201,9 +1488,17 @@ def format_bulk_report(results, dry_run=False, mode=None):
         else:
             fixed_label = "OK would collect: " if dry_run else "OK collected:     "
             linked_label = "-- would link:    " if dry_run else "-- linked (abs):  "
-        for sample_name, count in sorted(Counter(r['fixed_names']).items()):
+        network_counts = Counter(r.get('network_names') or [])
+        regular_fixed = Counter(r['fixed_names'])
+        regular_fixed.subtract(network_counts)
+        for sample_name, count in sorted(regular_fixed.items()):
+            if count <= 0:
+                continue
             suffix = f"  (x{count})" if count > 1 else ""
             lines.append(f"    {fixed_label}{sample_name}{suffix}")
+        for sample_name, count in sorted(network_counts.items()):
+            suffix = f"  (x{count})" if count > 1 else ""
+            lines.append(f"    OK copied from network: {sample_name}{suffix}")
         for sample_name, count in sorted(Counter(r.get('linked_names', [])).items()):
             suffix = f"  (x{count})" if count > 1 else ""
             lines.append(f"    {linked_label}{sample_name}{suffix}")

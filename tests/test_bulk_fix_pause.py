@@ -31,7 +31,8 @@ class BulkFixPauseTests(unittest.TestCase):
         progress = []
 
         def resolve_project(
-            project_path, _database, dry_run=False, name_index=None, mode="collect"
+            project_path, _database, dry_run=False, name_index=None, mode="collect",
+            network_name_index=None
         ):
             completed_projects.append(project_path)
             return {
@@ -94,7 +95,8 @@ class BulkFixPauseTests(unittest.TestCase):
         progress = []
 
         def resolve_project(
-            project_path, _database, dry_run=False, name_index=None, mode="collect"
+            project_path, _database, dry_run=False, name_index=None, mode="collect",
+            network_name_index=None
         ):
             completed_projects.append(project_path)
             return {
