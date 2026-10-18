@@ -191,22 +191,6 @@ python -m venv .venv
 
   
 
-Layout:
-
-  
-
-| Path | Contents |
-
-|---|---|
-
-| `app/` | Application source (GUI, automation, media tools) |
-
-| `tests/` | Unit tests |
-
-| `packaging/` | PyInstaller spec, Inno Setup script, installer artwork |
-
-| `vendor/AbletonOSC` | Patched AbletonOSC remote script |
-
   
 
 ## Troubleshooting
